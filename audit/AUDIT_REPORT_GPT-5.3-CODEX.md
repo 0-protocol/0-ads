@@ -1,145 +1,136 @@
-# 0-ads Security Audit Report (Post-Remediation Re-Audit)
+# 0-ads Security Audit Report (Second Re-Audit)
 
 - Target repository: `0-ads`
 - Initial audit date: 2026-03-14
-- Re-audit date: 2026-03-14
-- Method: static code review + targeted verification checks
+- First re-audit date: 2026-03-14
+- Second re-audit date: 2026-03-14
 - Auditor: GPT-5.3-Codex
 
 ---
 
-## 1. Executive Summary
+## 1. Scope and Context
 
-This is a re-audit after your remediation commit `22a1291` (`fix: remediate GPT-5.3-Codex independent audit (2C/3H/3M/3L)`).
+This update re-audits the codebase after the latest remediation commit:
 
-I re-verified the previously reported issues in:
+- `c87c15e` - `fix: resolve residual R-01 and R-02 for mainnet readiness`
+
+Reviewed changes include:
 
 - `src/main.rs`
-- `src/oracle.rs`
+- `contracts/evm/contracts/AdEscrow.sol`
+- `contracts/evm/test/AdEscrow.test.js`
 - `contracts/solana_anchor/src/lib.rs`
-- `Cargo.toml` and `Cargo.lock`
-- `Dockerfile`
-- `contracts/evm/package-lock.json`
-
-### Updated overall risk
-
-- Previous rating: **High**
-- Current rating: **Medium-Low** (testnet posture), still **not mainnet-ready**
-
-Most of the high-impact findings from the prior report are fixed. The key remaining risk is centralized trust in a single oracle signing key plus operational misconfiguration risk if auth is not strictly enforced outside hardened container defaults.
 
 ---
 
-## 2. Re-Audit Result Matrix
+## 2. Updated Security Posture
 
-| ID | Previous Severity | Finding | Status |
+- Previous rating (first re-audit): **Medium-Low**
+- Current rating (this re-audit): **Low-Medium**
+
+The two previously open residual items were addressed:
+
+- R-01 (oracle rotation capability) -> implemented
+- R-02 (fail-closed auth default) -> implemented
+
+The project is materially improved and closer to mainnet readiness, but still has protocol-level residual risk around off-chain GitHub verification semantics.
+
+---
+
+## 3. Re-Audit Matrix
+
+| ID | Prior Status | Current Status | Notes |
 |---|---|---|---|
-| C-01 | Critical | API auth fail-open when `API_SECRET` missing | **Resolved (with config caveat)** |
-| C-02 | Critical | No binding between GitHub identity and wallet | **Resolved** |
-| H-01 | High | Unbounded caller-controlled `deadline` | **Resolved** |
-| H-02 | High | Unbounded in-memory growth / DoS | **Resolved (partially optimized, acceptable)** |
-| H-03 | High | Weak Ed25519 instruction parsing checks | **Resolved** |
-| M-01 | Medium | `execute_graph` returns mocked success | **Mitigated (disabled by default)** |
-| M-02 | Medium | Internal error details leaked to clients | **Resolved** |
-| M-03 | Medium | Loose Solana token account constraints | **Resolved** |
-| L-01 | Low | Mutable Rust git dependency + missing lockfile | **Resolved** |
-| L-02 | Low | NPM lock baseline drift | **Resolved** |
-| L-03 | Low | Weak Docker hardening baseline | **Resolved** |
+| C-01 | Resolved (with caveat) | **Resolved** | Fail-closed behavior now default in code path |
+| C-02 | Resolved | **Resolved** | Wallet ownership binding remains in place |
+| H-01 | Resolved | **Resolved** | Deadline bounded server-side |
+| H-02 | Resolved | **Resolved** | Bounded intent/rate-limiter memory controls present |
+| H-03 | Resolved | **Resolved** | Ed25519 parsing checks remain hardened |
+| M-01 | Mitigated | **Mitigated** | `execute_graph` still feature-gated and disabled by default |
+| M-02 | Resolved | **Resolved** | Client error sanitization retained |
+| M-03 | Resolved | **Resolved** | Solana token-account constraints retained |
+| L-01 | Resolved | **Resolved** | Immutable dependency pin + lockfile retained |
+| L-02 | Resolved | **Resolved** | Lockfile baseline remains consistent |
+| L-03 | Resolved | **Resolved** | Docker hardening retained |
+| R-01 | Open | **Resolved** | Oracle rotation now supported on EVM and Solana paths |
+| R-02 | Open | **Resolved** | `REQUIRE_AUTH` now defaults to true |
 
 ---
 
-## 3. Verified Fixes
+## 4. Verified New Fixes
 
-### 3.1 Authentication hardening (C-01)
+### 4.1 R-01 Oracle key rotation support
 
-- `REQUIRE_AUTH` is now supported and startup fails if auth is required but `API_SECRET` is absent.
-- `Dockerfile` sets `REQUIRE_AUTH=true` by default, making containerized deployments fail-closed.
+**EVM (`AdEscrow.sol`)**
 
-### 3.2 Identity-to-wallet binding (C-02)
+- Added `updateOracle(bytes32 campaignId, address newOracle)`
+- Access control: advertiser-only (`c.advertiser == msg.sender`)
+- Input validation: rejects zero-address oracle
+- Emits `OracleUpdated(campaignId, oldOracle, newOracle)`
 
-- `verify_proof` now requires `wallet_sig`.
-- `src/oracle.rs` adds signature recovery (`verify_wallet_ownership`) over challenge:
-  - `0-ads-wallet-bind:{github_id}`
-- Recovered signer is matched to `agent_eth_addr` before oracle signing.
+**Solana (`contracts/solana_anchor/src/lib.rs`)**
 
-### 3.3 Deadline policy controls (H-01)
+- Added `update_oracle(ctx, new_oracle_pubkey)`
+- Account constraint includes `has_one = advertiser` on campaign account
+- Advertiser signer required via `UpdateOracle` context
 
-- `verify_proof` now rejects:
-  - past deadlines
-  - deadlines beyond `now + MAX_SIGNATURE_DEADLINE_SECS` (1 hour cap)
+### 4.2 R-02 Fail-closed auth by default
 
-### 3.4 DoS/memory controls (H-02)
+**Rust node (`src/main.rs`)**
 
-- Added hard caps:
-  - `MAX_ACTIVE_INTENTS = 10_000`
-  - `MAX_UNVERIFIED_INTENTS = 5_000`
-- Added stale key eviction for rate limiter windows (`evict_stale`).
-
-### 3.5 Solana Ed25519 validation hardening (H-03)
-
-- `verify_ed25519_signature` now validates:
-  - padding byte
-  - instruction index semantics (`u16::MAX` checks)
-  - bounds via `saturating_add`
-  - exact message length match against expected payload
-
-### 3.6 Medium/Low fixes
-
-- `execute_graph` endpoint is feature-gated (`ENABLE_GRAPH_EXECUTION`) and disabled by default.
-- API responses now return sanitized client errors; internals logged server-side.
-- Solana token accounts now include owner/mint constraints in campaign/claim/cancel flows.
-- `zerolang` dependency is pinned to immutable git `rev` and `Cargo.lock` exists.
-- `Dockerfile` now pins Rust toolchain image, uses non-root runtime user, and builds with `--locked`.
+- `REQUIRE_AUTH` now defaults to enabled:
+  - `.unwrap_or(true)`
+- Explicit opt-out is required (`REQUIRE_AUTH=false` or `0`)
+- Startup still refuses to run when auth required but `API_SECRET` missing
 
 ---
 
-## 4. Residual Risks (Still Open)
+## 5. Test Evidence
 
-## High
+- Re-ran `npm test` under `contracts/evm` after latest changes:
+  - **20 passing**
+  - Includes new `updateOracle` tests:
+    - advertiser key rotation success
+    - non-advertiser access rejection
+    - zero address rejection
+    - payout claim with rotated oracle
 
-### R-01 Single oracle key trust concentration
+Note: Rust host compile stability can still vary by local toolchain/OS configuration; verify in CI and release image pipeline for production sign-off.
 
-- Location: `src/oracle.rs`
-- Risk: one key compromise can authorize fraudulent signatures protocol-wide for campaigns trusting that oracle.
-- Recommendation:
-  - move to multi-oracle threshold signatures, or
-  - introduce on-chain key rotation with emergency revocation procedures.
+---
+
+## 6. Remaining Risks
 
 ## Medium
-
-### R-02 Auth policy can still be weakened by non-container deployment choices
-
-- Location: `src/main.rs` (`REQUIRE_AUTH` default false)
-- Risk: non-container operators can still run unauthenticated mode unless deployment policy enforces `REQUIRE_AUTH=true`.
-- Recommendation:
-  - consider fail-closed by default in code, or
-  - enforce strict deployment policy + startup guards in all environments.
 
 ### R-03 Off-chain GitHub verification remains TOCTOU-prone
 
 - Location: `src/oracle.rs` (`verify_github_star`)
-- Risk: user can satisfy star check transiently, obtain signature, then unstar.
+- Risk: a user can satisfy star state at verification time, obtain signature, then remove star later.
+- This is a protocol/property limitation rather than a direct implementation flaw.
 - Recommendation:
-  - document this as accepted risk for testnet,
-  - evaluate stronger attestation proofs (for example verifiable web proofs) for production.
+  - treat as accepted risk for current phase, and
+  - evaluate stronger attestations (for example verifiable web proofs) for mainnet-grade assurance.
+
+## Low
+
+### R-04 Solana oracle rotation allows arbitrary pubkey assignment
+
+- Location: `contracts/solana_anchor/src/lib.rs` (`update_oracle`)
+- Observation: unlike EVM’s zero-address check, Solana path currently permits any `Pubkey` value.
+- Impact: primarily operational (misconfiguration can break future claims until rotated again).
+- Recommendation:
+  - add explicit guardrails (for example deny known invalid sentinel values and add event logging for rotation metadata).
 
 ---
 
-## 5. Verification Notes
+## 7. Final Recommendation
 
-I ran targeted checks during this re-audit:
-
-- `npm test` in `contracts/evm` -> **16 passing**
-- `cargo check --locked` -> **failed due to local/toolchain environment issue while compiling `ring` C code on host**, not a direct logic regression in your remediation diff
-
-Given the Rust build environment failure, I recommend validating in CI or a known-good toolchain image before release tagging.
-
----
-
-## 6. Updated Recommendation
-
-- **Testnet:** acceptable with monitoring and strict deployment configuration.
-- **Mainnet:** do not proceed until residual high/medium risks are addressed, especially oracle key centralization and hard fail-closed auth policy across all deployment modes.
+- **Testnet:** acceptable.
+- **Mainnet:** near-ready from implementation perspective, but production launch should still include:
+  - formal runbooks for oracle-key incident response,
+  - CI-backed reproducible build checks,
+  - explicit risk acceptance for R-03 or stronger proof mechanism rollout.
 
 ---
 
