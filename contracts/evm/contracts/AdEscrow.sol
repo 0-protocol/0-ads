@@ -20,10 +20,13 @@ contract AdEscrow is ReentrancyGuard {
         uint256 payout;
         bytes32 verificationGraphHash;
         address oracle;
+        address previousOracle;
+        uint256 oracleUpdatedAt;
         uint256 createdAt;
     }
 
     uint256 public constant CANCEL_COOLDOWN = 7 days;
+    uint256 public constant ORACLE_GRACE_PERIOD = 1 hours;
 
     mapping(bytes32 => Campaign) public campaigns;
     mapping(bytes32 => mapping(address => bool)) public hasClaimed;
@@ -45,20 +48,26 @@ contract AdEscrow is ReentrancyGuard {
         require(campaigns[campaignId].advertiser == address(0), "Campaign already exists");
         require(payout > 0, "Payout must be positive");
         require(budget >= payout, "Budget must cover at least one payout");
+        require(oracle != address(0), "Oracle cannot be zero address");
 
+        uint256 balanceBefore = token.balanceOf(address(this));
         token.safeTransferFrom(msg.sender, address(this), budget);
+        uint256 actualBudget = token.balanceOf(address(this)) - balanceBefore;
+        require(actualBudget >= payout, "Received budget must cover at least one payout");
 
         campaigns[campaignId] = Campaign({
             advertiser: msg.sender,
             token: token,
-            budget: budget,
+            budget: actualBudget,
             payout: payout,
             verificationGraphHash: verificationGraphHash,
             oracle: oracle,
+            previousOracle: address(0),
+            oracleUpdatedAt: 0,
             createdAt: block.timestamp
         });
 
-        emit CampaignCreated(campaignId, msg.sender, budget, payout);
+        emit CampaignCreated(campaignId, msg.sender, actualBudget, payout);
     }
 
     function claimPayout(
@@ -66,9 +75,9 @@ contract AdEscrow is ReentrancyGuard {
         uint256 deadline,
         bytes memory oracleSignature
     ) external nonReentrant {
-        require(block.timestamp <= deadline, "Signature expired");
-
         Campaign storage c = campaigns[campaignId];
+        require(c.advertiser != address(0), "Campaign does not exist");
+        require(block.timestamp <= deadline, "Signature expired");
         require(c.budget >= c.payout, "Campaign empty");
         require(!hasClaimed[campaignId][msg.sender], "Agent already claimed");
 
@@ -84,7 +93,15 @@ contract AdEscrow is ReentrancyGuard {
         bytes32 ethSignedMessageHash = payloadHash.toEthSignedMessageHash();
         address signer = ethSignedMessageHash.recover(oracleSignature);
 
-        require(signer == c.oracle, "Invalid Oracle Signature");
+        bool validSigner = (signer == c.oracle);
+        if (
+            !validSigner &&
+            c.previousOracle != address(0) &&
+            block.timestamp <= c.oracleUpdatedAt + ORACLE_GRACE_PERIOD
+        ) {
+            validSigner = (signer == c.previousOracle);
+        }
+        require(validSigner, "Invalid Oracle Signature");
 
         hasClaimed[campaignId][msg.sender] = true;
         c.budget -= c.payout;
@@ -102,11 +119,13 @@ contract AdEscrow is ReentrancyGuard {
         Campaign storage c = campaigns[campaignId];
         require(c.advertiser == msg.sender, "Only advertiser can update oracle");
         require(newOracle != address(0), "Oracle cannot be zero address");
+        require(newOracle != c.oracle, "New oracle must differ from current");
 
-        address oldOracle = c.oracle;
+        c.previousOracle = c.oracle;
+        c.oracleUpdatedAt = block.timestamp;
         c.oracle = newOracle;
 
-        emit OracleUpdated(campaignId, oldOracle, newOracle);
+        emit OracleUpdated(campaignId, c.previousOracle, newOracle);
     }
 
     function cancelCampaign(bytes32 campaignId) external nonReentrant {

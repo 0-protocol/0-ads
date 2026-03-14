@@ -3,10 +3,12 @@ use reqwest::Client;
 use k256::ecdsa::{SigningKey, signature::Signer, VerifyingKey};
 use k256::ecdsa::{Signature, RecoveryId};
 use sha3::{Digest, Keccak256};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use dashmap::DashMap;
 use tracing::{info, warn};
 use zeroize::Zeroize;
+
+const CACHE_TTL_SECS: u64 = 3600;
 
 /// Trustless Verification Oracle.
 ///
@@ -16,7 +18,20 @@ use zeroize::Zeroize;
 pub struct AttentionOracle {
     client: Client,
     oracle_private_key: [u8; 32],
-    signature_cache: DashMap<(String, String), Vec<u8>>,
+    signature_cache: DashMap<CacheKey, CacheEntry>,
+}
+
+#[derive(Hash, Eq, PartialEq, Clone)]
+struct CacheKey {
+    campaign_id: String,
+    agent_eth_addr: String,
+    payout: u64,
+    deadline: u64,
+}
+
+struct CacheEntry {
+    signature: Vec<u8>,
+    created_at: Instant,
 }
 
 impl Drop for AttentionOracle {
@@ -103,6 +118,18 @@ impl AttentionOracle {
         Ok(())
     }
 
+    pub fn evict_expired_cache(&self) {
+        let now = Instant::now();
+        let ttl = Duration::from_secs(CACHE_TTL_SECS);
+        let stale_keys: Vec<CacheKey> = self.signature_cache.iter()
+            .filter(|entry| now.duration_since(entry.value().created_at) > ttl)
+            .map(|entry| entry.key().clone())
+            .collect();
+        for key in stale_keys {
+            self.signature_cache.remove(&key);
+        }
+    }
+
     pub async fn verify_github_star(
         &self,
         agent_github_id: &str,
@@ -114,10 +141,21 @@ impl AttentionOracle {
         payout: u64,
         deadline: u64,
     ) -> Result<Vec<u8>, VMError> {
-        let cache_key = (hex::encode(campaign_id), hex::encode(agent_eth_addr));
-        if let Some(cached) = self.signature_cache.get(&cache_key) {
-            info!("Returning cached signature for campaign/agent pair");
-            return Ok(cached.value().clone());
+        let cache_key = CacheKey {
+            campaign_id: hex::encode(campaign_id),
+            agent_eth_addr: hex::encode(agent_eth_addr),
+            payout,
+            deadline,
+        };
+
+        if let Some(entry) = self.signature_cache.get(&cache_key) {
+            if entry.created_at.elapsed() < Duration::from_secs(CACHE_TTL_SECS) {
+                info!("Returning cached signature for campaign/agent pair");
+                return Ok(entry.signature.clone());
+            } else {
+                drop(entry);
+                self.signature_cache.remove(&cache_key);
+            }
         }
 
         let url = format!(
@@ -142,8 +180,10 @@ impl AttentionOracle {
                     uri: url.clone(),
                     reason: e,
                 })?;
-            self.signature_cache
-                .insert(cache_key, signature.clone());
+            self.signature_cache.insert(cache_key, CacheEntry {
+                signature: signature.clone(),
+                created_at: Instant::now(),
+            });
             Ok(signature)
         } else {
             Err(VMError::ExternalResolutionFailed {

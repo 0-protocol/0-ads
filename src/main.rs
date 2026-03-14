@@ -13,7 +13,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use futures::StreamExt;
 use dashmap::DashMap;
 use parking_lot::Mutex;
-use tokio::sync::Semaphore;
+use tokio::sync::{mpsc, Semaphore};
 use tracing::{info, warn, error};
 
 mod network;
@@ -22,6 +22,7 @@ mod oracle;
 const MAX_ACTIVE_INTENTS: usize = 10_000;
 const MAX_UNVERIFIED_INTENTS: usize = 5_000;
 const MAX_SIGNATURE_DEADLINE_SECS: u64 = 3600; // 1 hour max TTL
+const GOSSIPSUB_TOPIC: &str = "0-ads-intents-v1";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AdIntent {
@@ -67,6 +68,7 @@ struct AppState {
     graph_execution_enabled: bool,
     graph_semaphore: Arc<Semaphore>,
     rate_limiter: Arc<SlidingWindowRateLimiter>,
+    gossipsub_tx: mpsc::UnboundedSender<Vec<u8>>,
 }
 
 fn load_oracle_key() -> Result<[u8; 32], Box<dyn std::error::Error>> {
@@ -152,6 +154,24 @@ fn check_api_key(headers: &HeaderMap, expected: &Option<String>, require_auth: b
         Some(provided) if provided == secret => Ok(()),
         _ => Err(StatusCode::UNAUTHORIZED),
     }
+}
+
+fn extract_rate_key(headers: &HeaderMap, req_identifier: Option<&str>) -> String {
+    if let Some(key) = headers.get("x-api-key").and_then(|v| v.to_str().ok()) {
+        return format!("apikey:{}", key);
+    }
+    if let Some(id) = req_identifier {
+        return format!("agent:{}", id);
+    }
+    if let Some(forwarded) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
+        if let Some(first_ip) = forwarded.split(',').next() {
+            return format!("ip:{}", first_ip.trim());
+        }
+    }
+    if let Some(real_ip) = headers.get("x-real-ip").and_then(|v| v.to_str().ok()) {
+        return format!("ip:{}", real_ip);
+    }
+    "anon:unknown".to_string()
 }
 
 fn unix_timestamp_now() -> u64 {
@@ -247,6 +267,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or(60);
     info!("Oracle rate limit: {} requests per minute per key", rate_limit_rpm);
 
+    let (gossipsub_tx, mut gossipsub_rx) = mpsc::unbounded_channel::<Vec<u8>>();
+
     let state = Arc::new(AppState {
         active_intents: DashMap::new(),
         unverified_intents: DashMap::new(),
@@ -256,6 +278,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         graph_execution_enabled,
         graph_semaphore: Arc::new(Semaphore::new(4)),
         rate_limiter: Arc::new(SlidingWindowRateLimiter::new(rate_limit_rpm, 60)),
+        gossipsub_tx,
     });
 
     let mut swarm = network::build_0_ads_swarm()?;
@@ -284,7 +307,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    // Background: promote validated intents + evict stale rate-limiter entries
     let verify_state = state.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
@@ -293,7 +315,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             interval.tick().await;
             eviction_counter += 1;
 
-            // Enforce capacity on unverified intents
             if verify_state.unverified_intents.len() > MAX_UNVERIFIED_INTENTS {
                 verify_state.unverified_intents.clear();
                 warn!("Unverified intents exceeded cap, cleared");
@@ -319,19 +340,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
 
-            // Evict stale rate-limiter entries every ~5 minutes
             if eviction_counter % 60 == 0 {
                 verify_state.rate_limiter.evict_stale();
+                verify_state.oracle.evict_expired_cache();
             }
         }
     });
+
+    let ad_topic = gossipsub::IdentTopic::new(GOSSIPSUB_TOPIC);
 
     loop {
         tokio::select! {
             event = swarm.select_next_some() => match event {
                 SwarmEvent::Behaviour(gossipsub::Event::Message { message, .. }) => {
                     info!("Received Ad Intent over Gossipsub");
-                    if verify_state.unverified_intents.len() < MAX_UNVERIFIED_INTENTS {
+                    if state.unverified_intents.len() < MAX_UNVERIFIED_INTENTS {
                         if let Ok(intent) = serde_json::from_slice::<AdIntent>(&message.data) {
                             state.unverified_intents.insert(intent.campaign_id.clone(), intent);
                         }
@@ -341,6 +364,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     info!("P2P Node listening on {:?}", address);
                 }
                 _ => {}
+            },
+            Some(data) = gossipsub_rx.recv() => {
+                if let Err(e) = swarm.behaviour_mut().publish(ad_topic.clone(), data) {
+                    warn!("Failed to publish intent to Gossipsub: {:?}", e);
+                }
             },
             _ = tokio::signal::ctrl_c() => {
                 info!("Received shutdown signal, exiting gracefully...");
@@ -385,7 +413,15 @@ async fn broadcast_intent(
             AxumJson(serde_json::json!({"error": "Intent capacity reached"})),
         );
     }
+
     info!("Broadcasting campaign {} to P2P network", intent.campaign_id);
+
+    if let Ok(data) = serde_json::to_vec(&intent) {
+        if let Err(e) = state.gossipsub_tx.send(data) {
+            warn!("Failed to queue intent for Gossipsub broadcast: {}", e);
+        }
+    }
+
     state
         .active_intents
         .insert(intent.campaign_id.clone(), intent);
@@ -410,11 +446,7 @@ async fn verify_proof(
         );
     }
 
-    let rate_key = headers
-        .get("x-api-key")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("anonymous")
-        .to_string();
+    let rate_key = extract_rate_key(&headers, Some(&req.agent_github_id));
     if !state.rate_limiter.check(&rate_key) {
         return (
             StatusCode::TOO_MANY_REQUESTS,
@@ -425,7 +457,6 @@ async fn verify_proof(
         );
     }
 
-    // H-01: Enforce server-side deadline bounds
     let now = unix_timestamp_now();
     if req.deadline <= now {
         return (
@@ -458,7 +489,6 @@ async fn verify_proof(
         }
     };
 
-    // C-02: Verify wallet ownership before signing
     let wallet_sig_bytes = match hex::decode(req.wallet_sig.trim_start_matches("0x")) {
         Ok(v) => v,
         Err(_) => {
@@ -531,7 +561,6 @@ pub async fn verify_graph_execution(
     headers: HeaderMap,
     Json(_req): Json<VerifyGraphRequest>,
 ) -> impl IntoResponse {
-    // M-01: gated behind feature flag
     if !state.graph_execution_enabled {
         return (
             StatusCode::NOT_FOUND,
@@ -552,11 +581,7 @@ pub async fn verify_graph_execution(
         );
     }
 
-    let rate_key = headers
-        .get("x-api-key")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("anonymous")
-        .to_string();
+    let rate_key = extract_rate_key(&headers, None);
     if !state.rate_limiter.check(&rate_key) {
         return (
             StatusCode::TOO_MANY_REQUESTS,

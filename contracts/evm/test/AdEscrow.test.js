@@ -73,6 +73,14 @@ describe("AdEscrow", function () {
       ).to.be.revertedWith("Budget must cover at least one payout");
     });
 
+    it("should revert if oracle is zero address", async function () {
+      await expect(
+        escrow.createCampaign(
+          CAMPAIGN_ID, await token.getAddress(), BUDGET, PAYOUT, GRAPH_HASH, ethers.ZeroAddress
+        )
+      ).to.be.revertedWith("Oracle cannot be zero address");
+    });
+
     it("should emit CampaignCreated with budget", async function () {
       await expect(
         escrow.createCampaign(
@@ -80,6 +88,24 @@ describe("AdEscrow", function () {
         )
       ).to.emit(escrow, "CampaignCreated")
         .withArgs(CAMPAIGN_ID, advertiser.address, BUDGET, PAYOUT);
+    });
+
+    it("should handle fee-on-transfer tokens correctly", async function () {
+      const MockFeeToken = await ethers.getContractFactory("MockFeeToken");
+      const feeToken = await MockFeeToken.deploy("Fee Token", "FEE", ethers.parseUnits("1000000", 18));
+      await feeToken.waitForDeployment();
+      await feeToken.approve(await escrow.getAddress(), ethers.MaxUint256);
+
+      const campaignId = ethers.encodeBytes32String("fee-token-camp");
+      const budget = ethers.parseUnits("1000", 18);
+      const payout = ethers.parseUnits("5", 18);
+
+      await escrow.createCampaign(
+        campaignId, await feeToken.getAddress(), budget, payout, GRAPH_HASH, oracle.address
+      );
+
+      const campaign = await escrow.campaigns(campaignId);
+      expect(campaign.budget).to.equal(ethers.parseUnits("990", 18));
     });
   });
 
@@ -140,6 +166,18 @@ describe("AdEscrow", function () {
       await expect(
         escrow.connect(agent).claimPayout(CAMPAIGN_ID, expiredDeadline, sig)
       ).to.be.revertedWith("Signature expired");
+    });
+
+    it("should revert for non-existent campaign", async function () {
+      const fakeCampaignId = ethers.encodeBytes32String("doesnt-exist");
+      const chainId = (await ethers.provider.getNetwork()).chainId;
+      const sig = await signPayout(
+        oracle, chainId, await escrow.getAddress(), fakeCampaignId, agent.address, PAYOUT, deadline
+      );
+
+      await expect(
+        escrow.connect(agent).claimPayout(fakeCampaignId, deadline, sig)
+      ).to.be.revertedWith("Campaign does not exist");
     });
 
     it("should emit CampaignExhausted when budget drops below payout (L-01)", async function () {
@@ -260,6 +298,12 @@ describe("AdEscrow", function () {
       ).to.be.revertedWith("Oracle cannot be zero address");
     });
 
+    it("should reject same oracle address", async function () {
+      await expect(
+        escrow.updateOracle(CAMPAIGN_ID, oracle.address)
+      ).to.be.revertedWith("New oracle must differ from current");
+    });
+
     it("should work with new oracle for claims", async function () {
       await escrow.updateOracle(CAMPAIGN_ID, attacker.address);
 
@@ -276,6 +320,43 @@ describe("AdEscrow", function () {
       const balAfter = await token.balanceOf(agent.address);
 
       expect(balAfter - balBefore).to.equal(PAYOUT);
+    });
+
+    it("should accept old oracle signature within grace period", async function () {
+      const block = await ethers.provider.getBlock("latest");
+      const deadline = block.timestamp + 7200;
+      const chainId = (await ethers.provider.getNetwork()).chainId;
+
+      const sigFromOldOracle = await signPayout(
+        oracle, chainId, await escrow.getAddress(), CAMPAIGN_ID, agent.address, PAYOUT, deadline
+      );
+
+      await escrow.updateOracle(CAMPAIGN_ID, attacker.address);
+
+      const balBefore = await token.balanceOf(agent.address);
+      await escrow.connect(agent).claimPayout(CAMPAIGN_ID, deadline, sigFromOldOracle);
+      const balAfter = await token.balanceOf(agent.address);
+
+      expect(balAfter - balBefore).to.equal(PAYOUT);
+    });
+
+    it("should reject old oracle signature after grace period", async function () {
+      const block = await ethers.provider.getBlock("latest");
+      const deadline = block.timestamp + 7200;
+      const chainId = (await ethers.provider.getNetwork()).chainId;
+
+      const sigFromOldOracle = await signPayout(
+        oracle, chainId, await escrow.getAddress(), CAMPAIGN_ID, agent.address, PAYOUT, deadline
+      );
+
+      await escrow.updateOracle(CAMPAIGN_ID, attacker.address);
+
+      await ethers.provider.send("evm_increaseTime", [3601]);
+      await ethers.provider.send("evm_mine");
+
+      await expect(
+        escrow.connect(agent).claimPayout(CAMPAIGN_ID, deadline, sigFromOldOracle)
+      ).to.be.revertedWith("Invalid Oracle Signature");
     });
   });
 });
