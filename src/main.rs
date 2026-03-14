@@ -1,5 +1,6 @@
 use axum::{
     extract::State,
+    response::Html,
     routing::{get, post},
     Json, Router,
 };
@@ -8,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use futures::StreamExt;
 use tokio::sync::RwLock;
-use tracing::{info, warn};
+use tracing::info;
 use rand::RngCore;
 
 mod network;
@@ -45,7 +46,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
     info!("Starting 0-ads Billboard Node...");
 
-    // Generate or load oracle key
     let mut oracle_key = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut oracle_key);
     let oracle = Arc::new(oracle::AttentionOracle::new(oracle_key));
@@ -60,6 +60,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let api_state = state.clone();
     let app = Router::new()
+        .route("/", get(serve_dashboard))
         .route("/api/v1/intents", get(get_intents))
         .route("/api/v1/intents/broadcast", post(broadcast_intent))
         .route("/api/v1/oracle/verify", post(verify_proof))
@@ -94,13 +95,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
+async fn serve_dashboard() -> Html<&'static str> {
+    Html(include_str!("dashboard.html"))
+}
+
 async fn get_intents(State(state): State<Arc<AppState>>) -> Json<Vec<AdIntent>> {
     let intents = state.active_intents.read().await;
     Json(intents.clone())
 }
 
-async fn broadcast_intent(State(_state): State<Arc<AppState>>, Json(intent): Json<AdIntent>) -> Json<&'static str> {
+async fn broadcast_intent(State(state): State<Arc<AppState>>, Json(intent): Json<AdIntent>) -> Json<&'static str> {
     info!("Broadcasting campaign {} to P2P network", intent.campaign_id);
+    let mut cache = state.active_intents.write().await;
+    cache.push(intent);
     Json("Intent Broadcasted to 0-ads Gossipsub network")
 }
 
