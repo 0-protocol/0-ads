@@ -14,14 +14,14 @@ pub struct AttentionOracle {
 impl AttentionOracle {
     pub async fn verify_github_star(&self, agent_github_id: &str, target_repo: &str) -> Result<Vec<u8>, VMError> {
         let url = format!("https://api.github.com/users/{}/starred/{}", agent_github_id, target_repo);
-        let resp = self.client.get(&url).send().await.map_err(|_| VMError::Custom("Oracle fetch failed".into()))?;
+        let resp = self.client.get(&url).send().await.map_err(|_| VMError::ExternalNodeResolutionFailed("Oracle fetch failed".into()))?;
         
         if resp.status().is_success() {
             // Sign the payload (AgentId, Repo, Timestamp, Result=1.0)
             let signature = self.sign_payload(agent_github_id, target_repo, 1.0);
             Ok(signature)
         } else {
-            Err(VMError::Custom("Agent did not star repo".into()))
+            Err(VMError::ExternalNodeResolutionFailed("Agent did not star repo".into()))
         }
     }
 

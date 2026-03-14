@@ -1,14 +1,11 @@
-use libp2p::core::Transport;
 use libp2p::{
     gossipsub::{self, MessageAuthenticity, ValidationMode},
     identity, PeerId, Swarm,
 };
 
-/// Phase 3: P2P Gossipsub Network for Attention Intents
-/// Agents use this network to receive high-paying Ad Intents without polling central servers.
-
 pub fn build_0_ads_swarm() -> Result<Swarm<gossipsub::Behaviour>, Box<dyn std::error::Error>> {
     let local_key = identity::Keypair::generate_ed25519();
+    let local_key_clone = local_key.clone();
     let local_peer_id = PeerId::from(local_key.public());
 
     let gossipsub_config = gossipsub::ConfigBuilder::default()
@@ -18,21 +15,22 @@ pub fn build_0_ads_swarm() -> Result<Swarm<gossipsub::Behaviour>, Box<dyn std::e
         .expect("Valid config");
 
     let mut gossipsub = gossipsub::Behaviour::new(
-        MessageAuthenticity::Signed(local_key),
+        MessageAuthenticity::Signed(local_key_clone),
         gossipsub_config,
     ).expect("Correct configuration");
 
-    // The topic that brands/advertisers broadcast Ad Intents to.
     let ad_topic = gossipsub::IdentTopic::new("0-ads-intents-v1");
     gossipsub.subscribe(&ad_topic)?;
 
-    // Start listening on all interfaces
-    // swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
+    let mut swarm = libp2p::swarm::SwarmBuilder::with_existing_identity(local_key)
+        .with_tokio()
+        .with_tcp(
+            libp2p::tcp::Config::default(),
+            libp2p::noise::Config::new,
+            libp2p::yamux::Config::default,
+        )?
+        .with_behaviour(|_| gossipsub)?
+        .build();
 
-    Ok(Swarm::new(
-        libp2p::tcp::tokio::Transport::default().boxed(),
-        gossipsub,
-        local_peer_id,
-        libp2p::swarm::Config::with_tokio_executor(),
-    ))
+    Ok(swarm)
 }
