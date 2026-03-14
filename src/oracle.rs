@@ -1,6 +1,6 @@
 use zerolang::VMError;
 use reqwest::Client;
-use serde_json::Value;
+use k256::ecdsa::{SigningKey, Signature, signature::Signer};
 
 /// Phase 2: Trustless Verification Oracle
 /// This oracle queries Web2 APIs (Twitter/GitHub/Moltbook) to cryptographically sign proof
@@ -12,12 +12,27 @@ pub struct AttentionOracle {
 }
 
 impl AttentionOracle {
+    pub fn new(private_key: [u8; 32]) -> Self {
+        Self {
+            client: Client::builder()
+                .user_agent("0-ads-billboard-node/1.0")
+                .build()
+                .unwrap(),
+            oracle_private_key: private_key,
+        }
+    }
+
     pub async fn verify_github_star(&self, agent_github_id: &str, target_repo: &str) -> Result<Vec<u8>, VMError> {
         let url = format!("https://api.github.com/users/{}/starred/{}", agent_github_id, target_repo);
-        let resp = self.client.get(&url).send().await.map_err(|_| VMError::ExternalResolutionFailed { uri: url.clone(), reason: "Oracle fetch failed".into() })?;
+        
+        let mut req = self.client.get(&url);
+        if let Ok(token) = std::env::var("GH_TOKEN") {
+            req = req.header("Authorization", format!("Bearer {}", token));
+        }
+        
+        let resp = req.send().await.map_err(|_| VMError::ExternalResolutionFailed { uri: url.clone(), reason: "Oracle fetch failed".into() })?;
         
         if resp.status().is_success() {
-            // Sign the payload (AgentId, Repo, Timestamp, Result=1.0)
             let signature = self.sign_payload(agent_github_id, target_repo, 1.0);
             Ok(signature)
         } else {
@@ -25,9 +40,15 @@ impl AttentionOracle {
         }
     }
 
-    fn sign_payload(&self, _agent_id: &str, _target: &str, _confidence: f32) -> Vec<u8> {
-        // In production, this uses k256 to sign an EIP-712 structured payload.
-        // It returns the signature bytes which 0-lang's `Op::VerifySignature` will accept.
-        vec![0x01, 0x02, 0x03] // stub
+    fn sign_payload(&self, agent_id: &str, target: &str, confidence: f32) -> Vec<u8> {
+        let signing_key = SigningKey::from_slice(&self.oracle_private_key).expect("Invalid private key");
+        
+        let mut message = Vec::new();
+        message.extend_from_slice(agent_id.as_bytes());
+        message.extend_from_slice(target.as_bytes());
+        message.extend_from_slice(&confidence.to_be_bytes());
+
+        let signature: Signature = signing_key.sign(&message);
+        signature.to_bytes().to_vec()
     }
 }

@@ -8,7 +8,8 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use futures::StreamExt;
 use tokio::sync::RwLock;
-use tracing::info;
+use tracing::{info, warn};
+use rand::RngCore;
 
 mod network;
 mod oracle;
@@ -22,10 +23,21 @@ pub struct AdIntent {
     pub verification_graph_hash: String,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VerifyRequest {
+    pub agent_github_id: String,
+    pub target_repo: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VerifyResponse {
+    pub signature: String,
+    pub error: Option<String>,
+}
+
 struct AppState {
-    // In-memory cache of active campaigns from the Gossipsub network
     active_intents: RwLock<Vec<AdIntent>>,
-    // We would inject a channel sender here to broadcast to the Swarm
+    oracle: Arc<oracle::AttentionOracle>,
 }
 
 #[tokio::main]
@@ -33,15 +45,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
     info!("Starting 0-ads Billboard Node...");
 
+    // Generate or load oracle key
+    let mut oracle_key = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut oracle_key);
+    let oracle = Arc::new(oracle::AttentionOracle::new(oracle_key));
+
     let state = Arc::new(AppState {
         active_intents: RwLock::new(Vec::new()),
+        oracle,
     });
 
-    // 1. Initialize P2P Swarm
     let mut swarm = network::build_0_ads_swarm()?;
     swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
 
-    // 2. Start HTTP API for lightweight SDKs (Python agents)
     let api_state = state.clone();
     let app = Router::new()
         .route("/api/v1/intents", get(get_intents))
@@ -59,12 +75,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .unwrap();
     });
 
-    // 3. Enter P2P Event Loop
     loop {
         tokio::select! {
             event = swarm.select_next_some() => match event {
                 SwarmEvent::Behaviour(gossipsub::Event::Message { message, .. }) => {
-                    info!("Received Ad Intent over Gossipsub: {:?}", String::from_utf8_lossy(&message.data));
+                    info!("Received Ad Intent over Gossipsub");
                     if let Ok(intent) = serde_json::from_slice::<AdIntent>(&message.data) {
                         let mut cache = state.active_intents.write().await;
                         cache.push(intent);
@@ -79,23 +94,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
-/// GET /api/v1/intents - SDKs fetch this to find active bounties
 async fn get_intents(State(state): State<Arc<AppState>>) -> Json<Vec<AdIntent>> {
     let intents = state.active_intents.read().await;
     Json(intents.clone())
 }
 
-/// POST /api/v1/intents/broadcast - Web DApps or advertisers post here to flood the P2P network
 async fn broadcast_intent(State(_state): State<Arc<AppState>>, Json(intent): Json<AdIntent>) -> Json<&'static str> {
-    // In reality, this sends the intent to the `swarm` to be gossiped to all other Billboard nodes.
     info!("Broadcasting campaign {} to P2P network", intent.campaign_id);
     Json("Intent Broadcasted to 0-ads Gossipsub network")
 }
 
-/// POST /api/v1/oracle/verify - Agents submit proof of execution (e.g. Moltbook URL)
-async fn verify_proof(State(_state): State<Arc<AppState>>, Json(_proof): Json<serde_json::Value>) -> Json<&'static str> {
-    // Triggers `oracle::AttentionOracle::verify_github_star`
-    // Signs the success payload and returns it to the Agent for the Smart Contract.
+async fn verify_proof(State(state): State<Arc<AppState>>, Json(req): Json<VerifyRequest>) -> Json<VerifyResponse> {
     info!("Oracle verifying agent proof payload...");
-    Json("0x0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20") // Mocked secp256k1 signature
+    match state.oracle.verify_github_star(&req.agent_github_id, &req.target_repo).await {
+        Ok(sig) => Json(VerifyResponse {
+            signature: hex::encode(sig),
+            error: None,
+        }),
+        Err(e) => Json(VerifyResponse {
+            signature: "".to_string(),
+            error: Some(format!("{:?}", e)),
+        }),
+    }
 }
