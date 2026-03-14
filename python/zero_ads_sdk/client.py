@@ -9,7 +9,7 @@ class ZeroAdsClient:
     execute them using their local LLM, and claim USDC instantly.
     """
     
-    def __init__(self, agent_wallet_key: str, relayer_url: str = "http://gateway.0-protocol.org:8080", mock: bool = True):
+    def __init__(self, agent_wallet_key: str, relayer_url: str = "https://ads.0-protocol.org", mock: bool = True):
         self.wallet_key = agent_wallet_key
         self.relayer = relayer_url
         self.mock = mock
