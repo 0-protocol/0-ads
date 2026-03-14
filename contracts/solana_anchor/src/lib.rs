@@ -1,9 +1,11 @@
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::ed25519_program;
 use anchor_lang::solana_program::sysvar::instructions as ix_sysvar;
-use anchor_spl::token::{self, Token, TokenAccount, Transfer};
+use anchor_spl::token::{self, CloseAccount, Token, TokenAccount, Transfer};
 
 declare_id!("Ads1111111111111111111111111111111111111111");
+
+const CANCEL_COOLDOWN_SECONDS: i64 = 7 * 24 * 60 * 60; // 7 days
 
 #[program]
 pub mod zero_ads_escrow {
@@ -27,6 +29,7 @@ pub mod zero_ads_escrow {
         campaign.remaining_budget = budget;
         campaign.verification_graph_hash = verification_graph_hash;
         campaign.oracle_pubkey = oracle_pubkey;
+        campaign.created_at = Clock::get()?.unix_timestamp;
 
         let cpi_accounts = Transfer {
             from: ctx.accounts.advertiser_token_account.to_account_info(),
@@ -81,6 +84,54 @@ pub mod zero_ads_escrow {
 
         Ok(())
     }
+
+    pub fn cancel_campaign(ctx: Context<CancelCampaign>) -> Result<()> {
+        let campaign = &ctx.accounts.campaign;
+
+        require!(
+            campaign.remaining_budget > 0,
+            ZeroAdsError::NoFundsToWithdraw
+        );
+
+        let now = Clock::get()?.unix_timestamp;
+        require!(
+            now >= campaign.created_at + CANCEL_COOLDOWN_SECONDS,
+            ZeroAdsError::CancelCooldownNotElapsed
+        );
+
+        let refund_amount = campaign.remaining_budget;
+
+        let seeds = &[
+            b"vault".as_ref(),
+            &campaign.campaign_id,
+            &[ctx.bumps.vault_token_account],
+        ];
+        let signer = &[&seeds[..]];
+
+        let cpi_accounts = Transfer {
+            from: ctx.accounts.vault_token_account.to_account_info(),
+            to: ctx.accounts.advertiser_token_account.to_account_info(),
+            authority: ctx.accounts.vault_token_account.to_account_info(),
+        };
+        let cpi_program = ctx.accounts.token_program.to_account_info();
+        let cpi_ctx = CpiContext::new_with_signer(cpi_program, cpi_accounts, signer);
+        token::transfer(cpi_ctx, refund_amount)?;
+
+        // Close the vault and return rent to advertiser
+        let close_accounts = CloseAccount {
+            account: ctx.accounts.vault_token_account.to_account_info(),
+            destination: ctx.accounts.advertiser.to_account_info(),
+            authority: ctx.accounts.vault_token_account.to_account_info(),
+        };
+        let close_ctx = CpiContext::new_with_signer(
+            ctx.accounts.token_program.to_account_info(),
+            close_accounts,
+            signer,
+        );
+        token::close_account(close_ctx)?;
+
+        Ok(())
+    }
 }
 
 fn verify_ed25519_signature(
@@ -111,15 +162,12 @@ fn verify_ed25519_signature(
         ZeroAdsError::InvalidSignature
     );
 
-    // Ed25519 instruction data layout: 1 sig count + per-sig header (2+2+2+2+2+2+2+2 = 16 bytes)
-    // then pubkey (32), signature (64), message (variable)
     let ix_data = &ed25519_ix.data;
     require!(ix_data.len() >= 16 + 32 + 64, ZeroAdsError::InvalidSignature);
 
     let num_signatures = ix_data[0];
     require!(num_signatures == 1, ZeroAdsError::InvalidSignature);
 
-    // Extract pubkey from the instruction data
     let pubkey_offset = u16::from_le_bytes([ix_data[6], ix_data[7]]) as usize;
     require!(
         ix_data.len() >= pubkey_offset + 32,
@@ -131,7 +179,6 @@ fn verify_ed25519_signature(
         ZeroAdsError::InvalidSignature
     );
 
-    // Reconstruct expected message: campaign_id(32) + agent(32) + payout(8)
     let mut expected_msg = Vec::with_capacity(72);
     expected_msg.extend_from_slice(campaign_id);
     expected_msg.extend_from_slice(agent.as_ref());
@@ -156,6 +203,8 @@ pub struct CreateCampaign<'info> {
         init,
         payer = advertiser,
         space = 8 + CampaignState::INIT_SPACE,
+        seeds = [b"campaign", campaign_id.as_ref()],
+        bump,
     )]
     pub campaign: Account<'info, CampaignState>,
     #[account(mut)]
@@ -206,6 +255,27 @@ pub struct ClaimPayout<'info> {
     pub system_program: Program<'info, System>,
 }
 
+#[derive(Accounts)]
+pub struct CancelCampaign<'info> {
+    #[account(
+        mut,
+        has_one = advertiser,
+        close = advertiser,
+    )]
+    pub campaign: Account<'info, CampaignState>,
+    #[account(mut)]
+    pub advertiser: Signer<'info>,
+    #[account(mut)]
+    pub advertiser_token_account: Account<'info, TokenAccount>,
+    #[account(
+        mut,
+        seeds = [b"vault", campaign.campaign_id.as_ref()],
+        bump,
+    )]
+    pub vault_token_account: Account<'info, TokenAccount>,
+    pub token_program: Program<'info, Token>,
+}
+
 #[account]
 #[derive(InitSpace)]
 pub struct CampaignState {
@@ -215,6 +285,7 @@ pub struct CampaignState {
     pub remaining_budget: u64,
     pub verification_graph_hash: [u8; 32],
     pub oracle_pubkey: Pubkey,
+    pub created_at: i64,
 }
 
 #[account]
@@ -235,4 +306,8 @@ pub enum ZeroAdsError {
     PayoutMustBePositive,
     #[msg("Budget must be at least one payout")]
     BudgetTooSmall,
+    #[msg("No funds remaining to withdraw")]
+    NoFundsToWithdraw,
+    #[msg("Cancel cooldown has not elapsed (7 days)")]
+    CancelCooldownNotElapsed,
 }

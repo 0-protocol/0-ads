@@ -7,9 +7,12 @@ use axum::{
 };
 use libp2p::{gossipsub, swarm::SwarmEvent};
 use serde::{Deserialize, Serialize};
+use std::collections::VecDeque;
 use std::sync::Arc;
+use std::time::Instant;
 use futures::StreamExt;
 use dashmap::DashMap;
+use parking_lot::Mutex;
 use tokio::sync::Semaphore;
 use tracing::{info, warn, error};
 
@@ -55,6 +58,7 @@ struct AppState {
     oracle: Arc<oracle::AttentionOracle>,
     api_secret: Option<String>,
     graph_semaphore: Arc<Semaphore>,
+    rate_limiter: Arc<SlidingWindowRateLimiter>,
 }
 
 fn load_oracle_key() -> Result<[u8; 32], Box<dyn std::error::Error>> {
@@ -145,6 +149,39 @@ fn check_api_key(headers: &HeaderMap, expected: &Option<String>) -> Result<(), S
     }
 }
 
+struct SlidingWindowRateLimiter {
+    windows: DashMap<String, Mutex<VecDeque<Instant>>>,
+    max_requests: usize,
+    window_secs: u64,
+}
+
+impl SlidingWindowRateLimiter {
+    fn new(max_requests: usize, window_secs: u64) -> Self {
+        Self {
+            windows: DashMap::new(),
+            max_requests,
+            window_secs,
+        }
+    }
+
+    fn check(&self, key: &str) -> bool {
+        let now = Instant::now();
+        let entry = self.windows.entry(key.to_string()).or_insert_with(|| Mutex::new(VecDeque::new()));
+        let mut timestamps = entry.lock();
+
+        let cutoff = now - std::time::Duration::from_secs(self.window_secs);
+        while timestamps.front().map_or(false, |t| *t < cutoff) {
+            timestamps.pop_front();
+        }
+
+        if timestamps.len() >= self.max_requests {
+            return false;
+        }
+        timestamps.push_back(now);
+        true
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
@@ -163,12 +200,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         warn!("API_SECRET not set — oracle endpoints are unauthenticated. Set API_SECRET for production use.");
     }
 
+    let rate_limit_rpm: usize = std::env::var("ORACLE_RATE_LIMIT_RPM")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(60);
+    info!("Oracle rate limit: {} requests per minute per key", rate_limit_rpm);
+
     let state = Arc::new(AppState {
         active_intents: DashMap::new(),
         unverified_intents: DashMap::new(),
         oracle,
         api_secret,
         graph_semaphore: Arc::new(Semaphore::new(4)),
+        rate_limiter: Arc::new(SlidingWindowRateLimiter::new(rate_limit_rpm, 60)),
     });
 
     let mut swarm = network::build_0_ads_swarm()?;
@@ -298,6 +342,21 @@ async fn verify_proof(
         );
     }
 
+    let rate_key = headers
+        .get("x-api-key")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("anonymous")
+        .to_string();
+    if !state.rate_limiter.check(&rate_key) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(VerifyResponse {
+                signature: String::new(),
+                error: Some("Rate limit exceeded. Try again later.".into()),
+            }),
+        );
+    }
+
     info!("Oracle verifying agent proof payload...");
 
     let c_addr = match hex_to_20(&req.contract_addr) {
@@ -370,6 +429,21 @@ pub async fn verify_graph_execution(
             Json(VerifyResponse {
                 signature: String::new(),
                 error: Some("Unauthorized: invalid or missing x-api-key".into()),
+            }),
+        );
+    }
+
+    let rate_key = headers
+        .get("x-api-key")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("anonymous")
+        .to_string();
+    if !state.rate_limiter.check(&rate_key) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(VerifyResponse {
+                signature: String::new(),
+                error: Some("Rate limit exceeded. Try again later.".into()),
             }),
         );
     }

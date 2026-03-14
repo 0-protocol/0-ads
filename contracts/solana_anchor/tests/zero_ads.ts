@@ -34,14 +34,11 @@ describe("zero_ads_escrow", () => {
     oracleKeypair = nacl.sign.keyPair();
     oraclePubkey = new PublicKey(oracleKeypair.publicKey);
 
-    // Airdrop SOL
     await provider.connection.requestAirdrop(advertiser.publicKey, 10 * anchor.web3.LAMPORTS_PER_SOL);
     await provider.connection.requestAirdrop(agent.publicKey, 10 * anchor.web3.LAMPORTS_PER_SOL);
 
-    // Wait for confirmation
     await new Promise(resolve => setTimeout(resolve, 1000));
 
-    // Create SPL token mint
     mint = await createMint(
       provider.connection,
       advertiser,
@@ -50,7 +47,6 @@ describe("zero_ads_escrow", () => {
       6
     );
 
-    // Create token accounts
     advertiserTokenAccount = await createAccount(
       provider.connection,
       advertiser,
@@ -64,18 +60,17 @@ describe("zero_ads_escrow", () => {
       agent.publicKey
     );
 
-    // Mint tokens to advertiser
     await mintTo(
       provider.connection,
       advertiser,
       mint,
       advertiserTokenAccount,
       advertiser,
-      budget.toNumber()
+      budget.toNumber() * 3 // enough for multiple test campaigns
     );
   });
 
-  it("creates a campaign with budget tracking (C-03)", async () => {
+  it("creates a campaign with PDA-derived account (N-02) and budget tracking (C-03)", async () => {
     const [campaignPda] = PublicKey.findProgramAddressSync(
       [Buffer.from("campaign"), campaignId],
       program.programId
@@ -84,10 +79,6 @@ describe("zero_ads_escrow", () => {
       [Buffer.from("vault"), campaignId],
       program.programId
     );
-
-    // Note: The program uses `init` without seeds on campaign,
-    // so we use a generated keypair for the campaign account.
-    const campaignAccount = Keypair.generate();
 
     await program.methods
       .createCampaign(
@@ -98,7 +89,7 @@ describe("zero_ads_escrow", () => {
         oraclePubkey
       )
       .accounts({
-        campaign: campaignAccount.publicKey,
+        campaign: campaignPda,
         advertiser: advertiser.publicKey,
         advertiserTokenAccount,
         vaultTokenAccount: vaultPda,
@@ -106,20 +97,61 @@ describe("zero_ads_escrow", () => {
         tokenProgram: TOKEN_PROGRAM_ID,
         systemProgram: SystemProgram.programId,
       })
-      .signers([advertiser, campaignAccount])
+      .signers([advertiser])
       .rpc();
 
-    const state = await program.account.campaignState.fetch(campaignAccount.publicKey);
+    const state = await program.account.campaignState.fetch(campaignPda);
     expect(state.advertiser.toBase58()).to.equal(advertiser.publicKey.toBase58());
     expect(state.remainingBudget.toNumber()).to.equal(budget.toNumber());
     expect(state.payout.toNumber()).to.equal(payout.toNumber());
     expect(state.oraclePubkey.toBase58()).to.equal(oraclePubkey.toBase58());
+    expect(state.createdAt.toNumber()).to.be.greaterThan(0);
+  });
+
+  it("rejects duplicate campaign_id via PDA (N-02)", async () => {
+    const [campaignPda] = PublicKey.findProgramAddressSync(
+      [Buffer.from("campaign"), campaignId],
+      program.programId
+    );
+    const [vaultPda] = PublicKey.findProgramAddressSync(
+      [Buffer.from("vault"), campaignId],
+      program.programId
+    );
+
+    try {
+      await program.methods
+        .createCampaign(
+          Array.from(campaignId),
+          budget,
+          payout,
+          Array.from(graphHash),
+          oraclePubkey
+        )
+        .accounts({
+          campaign: campaignPda,
+          advertiser: advertiser.publicKey,
+          advertiserTokenAccount,
+          vaultTokenAccount: vaultPda,
+          tokenMint: mint,
+          tokenProgram: TOKEN_PROGRAM_ID,
+          systemProgram: SystemProgram.programId,
+        })
+        .signers([advertiser])
+        .rpc();
+      expect.fail("Should have thrown on duplicate campaign PDA");
+    } catch (err) {
+      // Anchor rejects because the PDA account is already initialized
+      expect(err.toString()).to.not.be.empty;
+    }
   });
 
   it("rejects payout=0 (validation)", async () => {
-    const campaignAccount = Keypair.generate();
     const campaignId2 = new Uint8Array(32);
     campaignId2.set(Buffer.from("campaign-zero-pay"));
+    const [campaignPda2] = PublicKey.findProgramAddressSync(
+      [Buffer.from("campaign"), campaignId2],
+      program.programId
+    );
     const [vaultPda2] = PublicKey.findProgramAddressSync(
       [Buffer.from("vault"), campaignId2],
       program.programId
@@ -135,7 +167,7 @@ describe("zero_ads_escrow", () => {
           oraclePubkey
         )
         .accounts({
-          campaign: campaignAccount.publicKey,
+          campaign: campaignPda2,
           advertiser: advertiser.publicKey,
           advertiserTokenAccount,
           vaultTokenAccount: vaultPda2,
@@ -143,7 +175,7 @@ describe("zero_ads_escrow", () => {
           tokenProgram: TOKEN_PROGRAM_ID,
           systemProgram: SystemProgram.programId,
         })
-        .signers([advertiser, campaignAccount])
+        .signers([advertiser])
         .rpc();
       expect.fail("Should have thrown");
     } catch (err) {
@@ -152,16 +184,17 @@ describe("zero_ads_escrow", () => {
   });
 
   it("rejects claim without Ed25519 signature instruction (C-01)", async () => {
-    const campaignAccount = Keypair.generate();
     const campaignId3 = new Uint8Array(32);
     campaignId3.set(Buffer.from("campaign-nosig"));
+    const [campaignPda3] = PublicKey.findProgramAddressSync(
+      [Buffer.from("campaign"), campaignId3],
+      program.programId
+    );
     const [vaultPda3] = PublicKey.findProgramAddressSync(
       [Buffer.from("vault"), campaignId3],
       program.programId
     );
 
-    // First create
-    await mintTo(provider.connection, advertiser, mint, advertiserTokenAccount, advertiser, budget.toNumber());
     await program.methods
       .createCampaign(
         Array.from(campaignId3),
@@ -171,7 +204,7 @@ describe("zero_ads_escrow", () => {
         oraclePubkey
       )
       .accounts({
-        campaign: campaignAccount.publicKey,
+        campaign: campaignPda3,
         advertiser: advertiser.publicKey,
         advertiserTokenAccount,
         vaultTokenAccount: vaultPda3,
@@ -179,10 +212,9 @@ describe("zero_ads_escrow", () => {
         tokenProgram: TOKEN_PROGRAM_ID,
         systemProgram: SystemProgram.programId,
       })
-      .signers([advertiser, campaignAccount])
+      .signers([advertiser])
       .rpc();
 
-    // Try to claim without the Ed25519 pre-instruction
     const [claimReceiptPda] = PublicKey.findProgramAddressSync(
       [Buffer.from("claimed"), campaignId3, agent.publicKey.toBuffer()],
       program.programId
@@ -194,7 +226,7 @@ describe("zero_ads_escrow", () => {
       await program.methods
         .claimPayout(Array.from(fakeSignature))
         .accounts({
-          campaign: campaignAccount.publicKey,
+          campaign: campaignPda3,
           agent: agent.publicKey,
           agentTokenAccount,
           vaultTokenAccount: vaultPda3,
@@ -208,6 +240,63 @@ describe("zero_ads_escrow", () => {
       expect.fail("Should have thrown due to missing Ed25519 verification");
     } catch (err) {
       expect(err.toString()).to.include("InvalidSignature");
+    }
+  });
+
+  it("rejects cancel before cooldown (N-01)", async () => {
+    const [campaignPda] = PublicKey.findProgramAddressSync(
+      [Buffer.from("campaign"), campaignId],
+      program.programId
+    );
+    const [vaultPda] = PublicKey.findProgramAddressSync(
+      [Buffer.from("vault"), campaignId],
+      program.programId
+    );
+
+    try {
+      await program.methods
+        .cancelCampaign()
+        .accounts({
+          campaign: campaignPda,
+          advertiser: advertiser.publicKey,
+          advertiserTokenAccount,
+          vaultTokenAccount: vaultPda,
+          tokenProgram: TOKEN_PROGRAM_ID,
+        })
+        .signers([advertiser])
+        .rpc();
+      expect.fail("Should have thrown due to cooldown");
+    } catch (err) {
+      expect(err.toString()).to.include("CancelCooldownNotElapsed");
+    }
+  });
+
+  it("rejects cancel from non-advertiser (N-01)", async () => {
+    const [campaignPda] = PublicKey.findProgramAddressSync(
+      [Buffer.from("campaign"), campaignId],
+      program.programId
+    );
+    const [vaultPda] = PublicKey.findProgramAddressSync(
+      [Buffer.from("vault"), campaignId],
+      program.programId
+    );
+
+    try {
+      await program.methods
+        .cancelCampaign()
+        .accounts({
+          campaign: campaignPda,
+          advertiser: agent.publicKey, // wrong advertiser
+          advertiserTokenAccount: agentTokenAccount,
+          vaultTokenAccount: vaultPda,
+          tokenProgram: TOKEN_PROGRAM_ID,
+        })
+        .signers([agent])
+        .rpc();
+      expect.fail("Should have thrown due to wrong advertiser");
+    } catch (err) {
+      // Anchor has_one constraint fails
+      expect(err.toString()).to.not.be.empty;
     }
   });
 });
