@@ -85,6 +85,12 @@ pub mod zero_ads_escrow {
         Ok(())
     }
 
+    pub fn update_oracle(ctx: Context<UpdateOracle>, new_oracle_pubkey: Pubkey) -> Result<()> {
+        let campaign = &mut ctx.accounts.campaign;
+        campaign.oracle_pubkey = new_oracle_pubkey;
+        Ok(())
+    }
+
     pub fn cancel_campaign(ctx: Context<CancelCampaign>) -> Result<()> {
         let campaign = &ctx.accounts.campaign;
 
@@ -299,6 +305,16 @@ pub struct ClaimPayout<'info> {
     pub instruction_sysvar: AccountInfo<'info>,
     pub token_program: Program<'info, Token>,
     pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct UpdateOracle<'info> {
+    #[account(
+        mut,
+        has_one = advertiser,
+    )]
+    pub campaign: Account<'info, CampaignState>,
+    pub advertiser: Signer<'info>,
 }
 
 #[derive(Accounts)]

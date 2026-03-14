@@ -223,8 +223,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Oracle address: 0x{}", oracle.public_address_hex());
 
     let require_auth = std::env::var("REQUIRE_AUTH")
-        .map(|v| v == "true" || v == "1")
-        .unwrap_or(false);
+        .map(|v| v != "false" && v != "0")
+        .unwrap_or(true);
 
     let api_secret = std::env::var("API_SECRET").ok();
     if require_auth && api_secret.is_none() {

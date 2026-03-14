@@ -32,6 +32,7 @@ contract AdEscrow is ReentrancyGuard {
     event PayoutClaimed(bytes32 indexed campaignId, address indexed agent, uint256 amount);
     event CampaignCancelled(bytes32 indexed campaignId, address indexed advertiser, uint256 refund);
     event CampaignExhausted(bytes32 indexed campaignId);
+    event OracleUpdated(bytes32 indexed campaignId, address indexed oldOracle, address indexed newOracle);
 
     function createCampaign(
         bytes32 campaignId,
@@ -95,6 +96,17 @@ contract AdEscrow is ReentrancyGuard {
         if (c.budget < c.payout) {
             emit CampaignExhausted(campaignId);
         }
+    }
+
+    function updateOracle(bytes32 campaignId, address newOracle) external {
+        Campaign storage c = campaigns[campaignId];
+        require(c.advertiser == msg.sender, "Only advertiser can update oracle");
+        require(newOracle != address(0), "Oracle cannot be zero address");
+
+        address oldOracle = c.oracle;
+        c.oracle = newOracle;
+
+        emit OracleUpdated(campaignId, oldOracle, newOracle);
     }
 
     function cancelCampaign(bytes32 campaignId) external nonReentrant {

@@ -231,4 +231,51 @@ describe("AdEscrow", function () {
       ).to.be.revertedWith("No funds to withdraw");
     });
   });
+
+  describe("updateOracle", function () {
+    beforeEach(async function () {
+      await escrow.createCampaign(
+        CAMPAIGN_ID, await token.getAddress(), BUDGET, PAYOUT, GRAPH_HASH, oracle.address
+      );
+    });
+
+    it("should allow advertiser to rotate oracle key (R-01)", async function () {
+      await expect(escrow.updateOracle(CAMPAIGN_ID, attacker.address))
+        .to.emit(escrow, "OracleUpdated")
+        .withArgs(CAMPAIGN_ID, oracle.address, attacker.address);
+
+      const campaign = await escrow.campaigns(CAMPAIGN_ID);
+      expect(campaign.oracle).to.equal(attacker.address);
+    });
+
+    it("should reject non-advertiser oracle update", async function () {
+      await expect(
+        escrow.connect(attacker).updateOracle(CAMPAIGN_ID, attacker.address)
+      ).to.be.revertedWith("Only advertiser can update oracle");
+    });
+
+    it("should reject zero address oracle", async function () {
+      await expect(
+        escrow.updateOracle(CAMPAIGN_ID, ethers.ZeroAddress)
+      ).to.be.revertedWith("Oracle cannot be zero address");
+    });
+
+    it("should work with new oracle for claims", async function () {
+      await escrow.updateOracle(CAMPAIGN_ID, attacker.address);
+
+      const block = await ethers.provider.getBlock("latest");
+      const deadline = block.timestamp + 3600;
+      const chainId = (await ethers.provider.getNetwork()).chainId;
+
+      const sig = await signPayout(
+        attacker, chainId, await escrow.getAddress(), CAMPAIGN_ID, agent.address, PAYOUT, deadline
+      );
+
+      const balBefore = await token.balanceOf(agent.address);
+      await escrow.connect(agent).claimPayout(CAMPAIGN_ID, deadline, sig);
+      const balAfter = await token.balanceOf(agent.address);
+
+      expect(balAfter - balBefore).to.equal(PAYOUT);
+    });
+  });
 });
