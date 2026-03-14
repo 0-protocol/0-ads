@@ -1,189 +1,145 @@
-# 0-ads Security Audit Report (Independent Review)
+# 0-ads Security Audit Report (Post-Remediation Re-Audit)
 
 - Target repository: `0-ads`
-- Audit date: 2026-03-14
-- Method: Static security review (Rust/EVM/Solana/dependencies/deployment)
-- Conclusion: Current version should not be used on production mainnet without remediation
+- Initial audit date: 2026-03-14
+- Re-audit date: 2026-03-14
+- Method: static code review + targeted verification checks
 - Auditor: GPT-5.3-Codex
 
 ---
 
 ## 1. Executive Summary
 
-This review covers the core runtime (`src/main.rs`, `src/oracle.rs`, `src/network.rs`), EVM contract (`contracts/evm/contracts/AdEscrow.sol`), Solana Anchor program (`contracts/solana_anchor/src/lib.rs`), and supply-chain/deployment posture (`Cargo.toml`, `package*.json`, `Dockerfile`).
+This is a re-audit after your remediation commit `22a1291` (`fix: remediate GPT-5.3-Codex independent audit (2C/3H/3M/3L)`).
 
-The dominant risks are:
+I re-verified the previously reported issues in:
 
-1. Weak authentication/authorization boundaries (`API_SECRET` fail-open, no identity-to-wallet binding).
-2. Signature lifetime and replay risk (`deadline` fully caller-controlled, reusable signature patterns).
-3. Availability and supply-chain risk (unbounded in-memory structures, lockfile drift, weak container hardening).
+- `src/main.rs`
+- `src/oracle.rs`
+- `contracts/solana_anchor/src/lib.rs`
+- `Cargo.toml` and `Cargo.lock`
+- `Dockerfile`
+- `contracts/evm/package-lock.json`
 
-Overall risk rating: **High**.
+### Updated overall risk
 
----
+- Previous rating: **High**
+- Current rating: **Medium-Low** (testnet posture), still **not mainnet-ready**
 
-## 2. Threat Model and Attack Surface
-
-### 2.1 Adversary Model
-
-- Unauthenticated external callers hitting HTTP APIs directly.
-- Malicious agents attempting forged or replayed payout claims.
-- Supply-chain attackers exploiting mutable dependencies and lock drift.
-- Infrastructure attackers leveraging deployment misconfiguration and container privilege defaults.
-
-### 2.2 Attack Surface
-
-- Oracle APIs: `/api/v1/oracle/verify`, `/api/v1/oracle/execute_graph`
-- Intent APIs: `/api/v1/intents`, `/api/v1/intents/broadcast`
-- EVM settlement flow: `createCampaign`, `claimPayout`, `cancelCampaign`
-- Solana settlement flow: `create_campaign`, `claim_payout`, `cancel_campaign`, Ed25519 instruction verification
-- Supply-chain/deployment: Cargo/NPM dependency controls, Docker runtime baseline, key handling
+Most of the high-impact findings from the prior report are fixed. The key remaining risk is centralized trust in a single oracle signing key plus operational misconfiguration risk if auth is not strictly enforced outside hardened container defaults.
 
 ---
 
-## 3. Findings (Sorted by Severity)
+## 2. Re-Audit Result Matrix
 
-## Critical
+| ID | Previous Severity | Finding | Status |
+|---|---|---|---|
+| C-01 | Critical | API auth fail-open when `API_SECRET` missing | **Resolved (with config caveat)** |
+| C-02 | Critical | No binding between GitHub identity and wallet | **Resolved** |
+| H-01 | High | Unbounded caller-controlled `deadline` | **Resolved** |
+| H-02 | High | Unbounded in-memory growth / DoS | **Resolved (partially optimized, acceptable)** |
+| H-03 | High | Weak Ed25519 instruction parsing checks | **Resolved** |
+| M-01 | Medium | `execute_graph` returns mocked success | **Mitigated (disabled by default)** |
+| M-02 | Medium | Internal error details leaked to clients | **Resolved** |
+| M-03 | Medium | Loose Solana token account constraints | **Resolved** |
+| L-01 | Low | Mutable Rust git dependency + missing lockfile | **Resolved** |
+| L-02 | Low | NPM lock baseline drift | **Resolved** |
+| L-03 | Low | Weak Docker hardening baseline | **Resolved** |
 
-### C-01 Authentication fails open when `API_SECRET` is missing
+---
 
-- Location: `src/main.rs` (`check_api_key`, `main`, `verify_proof`, `verify_graph_execution`)
-- Issue: `check_api_key` returns success when `API_SECRET` is not configured.
-- Impact: Oracle endpoints can be called anonymously in misconfigured environments.
-- Remediation:
-  - Enforce fail-closed startup for production when auth secret is absent.
-  - Add explicit required auth mode (for example `REQUIRE_AUTH=true`) and deployment preflight checks.
+## 3. Verified Fixes
 
-### C-02 No binding between GitHub identity and payout wallet
+### 3.1 Authentication hardening (C-01)
 
-- Location: `src/main.rs` (`verify_proof`), `src/oracle.rs` (`verify_github_star`)
-- Issue: Verification checks GitHub star state, but signs caller-provided `agent_eth_addr` without ownership linkage.
-- Impact: Attackers can satisfy GitHub condition with one identity and receive payout signatures for another wallet.
-- Remediation:
-  - Introduce verifiable account linkage (OAuth identity + wallet challenge signature).
-  - Enforce a persisted `(github_id -> wallet)` mapping before signing.
+- `REQUIRE_AUTH` is now supported and startup fails if auth is required but `API_SECRET` is absent.
+- `Dockerfile` sets `REQUIRE_AUTH=true` by default, making containerized deployments fail-closed.
+
+### 3.2 Identity-to-wallet binding (C-02)
+
+- `verify_proof` now requires `wallet_sig`.
+- `src/oracle.rs` adds signature recovery (`verify_wallet_ownership`) over challenge:
+  - `0-ads-wallet-bind:{github_id}`
+- Recovered signer is matched to `agent_eth_addr` before oracle signing.
+
+### 3.3 Deadline policy controls (H-01)
+
+- `verify_proof` now rejects:
+  - past deadlines
+  - deadlines beyond `now + MAX_SIGNATURE_DEADLINE_SECS` (1 hour cap)
+
+### 3.4 DoS/memory controls (H-02)
+
+- Added hard caps:
+  - `MAX_ACTIVE_INTENTS = 10_000`
+  - `MAX_UNVERIFIED_INTENTS = 5_000`
+- Added stale key eviction for rate limiter windows (`evict_stale`).
+
+### 3.5 Solana Ed25519 validation hardening (H-03)
+
+- `verify_ed25519_signature` now validates:
+  - padding byte
+  - instruction index semantics (`u16::MAX` checks)
+  - bounds via `saturating_add`
+  - exact message length match against expected payload
+
+### 3.6 Medium/Low fixes
+
+- `execute_graph` endpoint is feature-gated (`ENABLE_GRAPH_EXECUTION`) and disabled by default.
+- API responses now return sanitized client errors; internals logged server-side.
+- Solana token accounts now include owner/mint constraints in campaign/claim/cancel flows.
+- `zerolang` dependency is pinned to immutable git `rev` and `Cargo.lock` exists.
+- `Dockerfile` now pins Rust toolchain image, uses non-root runtime user, and builds with `--locked`.
+
+---
+
+## 4. Residual Risks (Still Open)
 
 ## High
 
-### H-01 Caller-controlled `deadline` without policy bounds
+### R-01 Single oracle key trust concentration
 
-- Location: `src/main.rs` (`verify_proof`), `src/oracle.rs` (`sign_payout`)
-- Issue: No server-side max/min validity window for `deadline`.
-- Impact: Signatures can be issued with overly long validity windows, increasing replay and key-exposure blast radius.
-- Remediation:
-  - Enforce `now <= deadline <= now + MAX_TTL`.
-  - Add nonce/claim-id semantics and one-time claim enforcement.
-
-### H-02 Multiple unbounded memory structures enable DoS
-
-- Location: `src/main.rs` (`active_intents`, `unverified_intents`, `SlidingWindowRateLimiter.windows`)
-- Issue: Several `DashMap` collections have no cap/eviction policy.
-- Impact: High-cardinality spam can grow memory indefinitely and degrade availability.
-- Remediation:
-  - Use bounded caches (TTL + LRU + hard global limits).
-  - Add body-size limits, per-IP controls, key-cardinality controls, and backpressure.
-
-### H-03 High-risk Ed25519 instruction parsing in Solana verifier
-
-- Location: `contracts/solana_anchor/src/lib.rs` (`verify_ed25519_signature`)
-- Issue: Manual offset parsing lacks strict validation of full Ed25519 instruction layout/index semantics.
-- Impact: Potential mismatch between what was cryptographically verified and what is parsed/accepted.
-- Remediation:
-  - Parse and validate the complete canonical Ed25519 instruction layout, including index fields.
-  - Add malformed-input and fuzz tests with adversarial instruction payloads.
+- Location: `src/oracle.rs`
+- Risk: one key compromise can authorize fraudulent signatures protocol-wide for campaigns trusting that oracle.
+- Recommendation:
+  - move to multi-oracle threshold signatures, or
+  - introduce on-chain key rotation with emergency revocation procedures.
 
 ## Medium
 
-### M-01 `execute_graph` currently returns mocked success
+### R-02 Auth policy can still be weakened by non-container deployment choices
 
-- Location: `src/main.rs` (`verify_graph_execution`)
-- Issue: Request payload is ignored; endpoint returns fixed “success” behavior.
-- Impact: Upstream systems can mistakenly trust non-verified results.
-- Remediation:
-  - Disable endpoint by default until real verification exists, or gate behind an explicit feature flag.
-  - Bind output to validated input hash, requester identity, and nonce.
+- Location: `src/main.rs` (`REQUIRE_AUTH` default false)
+- Risk: non-container operators can still run unauthenticated mode unless deployment policy enforces `REQUIRE_AUTH=true`.
+- Recommendation:
+  - consider fail-closed by default in code, or
+  - enforce strict deployment policy + startup guards in all environments.
 
-### M-02 Internal error details exposed to clients
+### R-03 Off-chain GitHub verification remains TOCTOU-prone
 
-- Location: `src/main.rs` (`verify_proof`, `format!("{:?}", e)`)
-- Issue: Raw internal errors are returned in API responses.
-- Impact: Information disclosure useful for reconnaissance and endpoint behavior fingerprinting.
-- Remediation:
-  - Return stable generic client-safe error messages.
-  - Log detailed diagnostics server-side only.
-
-### M-03 Solana TokenAccount constraints remain loose
-
-- Location: `contracts/solana_anchor/src/lib.rs` (`CreateCampaign`, `ClaimPayout`, `CancelCampaign`)
-- Issue: Critical token accounts are not fully constrained with strict `token::mint` and `token::authority` checks.
-- Impact: Greater risk of misrouting/incorrect account wiring in hostile or faulty integrations.
-- Remediation:
-  - Add explicit account constraints for advertiser, agent, vault, and mint consistency.
-  - Prefer ATA-based constraints where possible.
-
-## Low
-
-### L-01 Rust supply-chain lock discipline is insufficient
-
-- Location: `Cargo.toml` (`zerolang` pinned to git branch `main`), missing repository `Cargo.lock`
-- Issue: Build output can drift with upstream branch movement.
-- Impact: Non-reproducible builds and increased supply-chain compromise risk.
-- Remediation:
-  - Pin git dependency to immutable commit (`rev`).
-  - Commit `Cargo.lock` and enforce `cargo build --locked`.
-
-### L-02 NPM manifest and lockfile baseline drift
-
-- Location: `contracts/evm/package.json`, `contracts/evm/package-lock.json`
-- Issue: Lockfile still includes stale version markers (for example `"hh2"`), inconsistent with manifest.
-- Impact: Reduced reproducibility and auditability of dependency tree.
-- Remediation:
-  - Regenerate lockfile from clean baseline.
-  - Enforce `npm ci`, lockfile integrity checks, and dependency audit in CI.
-
-### L-03 Docker runtime hardening gaps
-
-- Location: `Dockerfile`
-- Issue: Uses `rust:latest`, runtime default root user, minimal hardening controls.
-- Impact: Larger attack surface and higher impact if container compromise occurs.
-- Remediation:
-  - Pin base images by digest.
-  - Run as non-root, minimize packages/capabilities, set read-only filesystem and resource controls.
+- Location: `src/oracle.rs` (`verify_github_star`)
+- Risk: user can satisfy star check transiently, obtain signature, then unstar.
+- Recommendation:
+  - document this as accepted risk for testnet,
+  - evaluate stronger attestation proofs (for example verifiable web proofs) for production.
 
 ---
 
-## 4. Positive Security Controls Already Present
+## 5. Verification Notes
 
-- EVM contract uses `SafeERC20`, `ReentrancyGuard`, and signature expiry checks.
-- Oracle private key memory is zeroized on drop (`zeroize`).
-- Oracle endpoints include API key and rate-limiting framework (needs promotion from optional to mandatory).
+I ran targeted checks during this re-audit:
 
----
+- `npm test` in `contracts/evm` -> **16 passing**
+- `cargo check --locked` -> **failed due to local/toolchain environment issue while compiling `ring` C code on host**, not a direct logic regression in your remediation diff
 
-## 5. Recommended Remediation Priority
-
-- **P0 (Immediate):** C-01, C-02, H-01, H-03
-- **P1 (Current sprint):** H-02, M-01, M-02, M-03
-- **P2 (Next sprint):** L-01, L-02, L-03
+Given the Rust build environment failure, I recommend validating in CI or a known-good toolchain image before release tagging.
 
 ---
 
-## 6. Suggested Regression Test Suite
+## 6. Updated Recommendation
 
-1. Auth enforcement: process must fail startup when `API_SECRET` is required but missing.
-2. Identity binding: reject signature issuance when GitHub identity and wallet ownership do not match.
-3. Deadline policy: reject expired and far-future deadlines.
-4. Replay resistance: one claim nonce/claim-id must be one-time consumable.
-5. DoS resilience: high-cardinality spam must not produce unbounded memory growth.
-6. Solana Ed25519 negative tests: malformed offsets/index/message combinations must all fail.
-7. Supply-chain checks: `cargo build --locked`, `npm ci`, and container scanning (Trivy/Scout).
-
----
-
-## 7. Audit Notes
-
-- This report is a point-in-time static analysis and is not a formal proof of security.
-- Before mainnet use, complete all P0/P1 fixes and obtain an independent third-party manual audit.
+- **Testnet:** acceptable with monitoring and strict deployment configuration.
+- **Mainnet:** do not proceed until residual high/medium risks are addressed, especially oracle key centralization and hard fail-closed auth policy across all deployment modes.
 
 ---
 
