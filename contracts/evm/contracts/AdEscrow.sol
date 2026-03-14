@@ -3,10 +3,12 @@ pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
+import "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
 
 /// Phase 4: AdEscrow - Atomic Settlement for Agent-Native Ads
 contract AdEscrow {
     using ECDSA for bytes32;
+    using MessageHashUtils for bytes32;
 
     struct Campaign {
         address advertiser;
@@ -54,8 +56,6 @@ contract AdEscrow {
         require(!hasClaimed[campaignId][msg.sender], "Agent already claimed");
 
         // Epic 1: Sun Force Cryptographic Audit - Replay Attack Prevention
-        // Verify Oracle signature with strictly aligned abi.encode containing:
-        // Chain ID (prevent cross-chain), Address (prevent cross-contract), Campaign, Agent, Payout
         bytes32 payloadHash = keccak256(abi.encode(
             block.chainid,
             address(this),
