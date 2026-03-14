@@ -1,6 +1,5 @@
 import json
 import requests
-import secp256k1
 
 """
 Phase 5: The Genesis Campaign Launcher (Dogfooding 0-lang)
@@ -25,15 +24,14 @@ def launch_genesis_campaign():
             "targetUri": "https://github.com/0-protocol/0-lang",
             "prompt": "Analyze the 0-lang VM and Op::VerifySignature opcode for decentralized AI inference."
         },
-        "verificationGraphHash": "0x4f8b9e...2a1" # The hash of the .0 compiled intent
+        # TODO: Replace with actual compiled 0-lang graph hash after deployment
+        "verificationGraphHash": "0x0000000000000000000000000000000000000000000000000000000000000000"
     }
 
-    # Broadcast to the local 0-ads gossipsub node
     print(f"Launching Genesis Campaign: {intent['campaignId']}")
     print(f"Budget: {intent['budget']} USDC")
     print(f"Payout per Agent: {intent['payoutPerExecution']} USDC")
     
-    # Example post to local relayer
     try:
         res = requests.post("http://localhost:8080/api/v1/intents/broadcast", json=intent)
         print("Broadcast successful! Idle agents are now picking up the bounty.")

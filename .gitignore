@@ -1,0 +1,28 @@
+# Dependencies
+node_modules/
+
+# Build artifacts
+target/
+contracts/evm/artifacts/
+contracts/evm/cache/
+contracts/evm/typechain-types/
+
+# Environment
+.env
+*.pem
+*.key
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/

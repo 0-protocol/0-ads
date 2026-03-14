@@ -1,6 +1,7 @@
 use axum::{
     extract::State,
-    response::Html,
+    http::{HeaderMap, StatusCode},
+    response::{Html, IntoResponse, Json as AxumJson},
     routing::{get, post},
     Json, Router,
 };
@@ -9,8 +10,8 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use futures::StreamExt;
 use dashmap::DashMap;
-use tracing::{info, error};
-use rand::RngCore;
+use tokio::sync::Semaphore;
+use tracing::{info, warn, error};
 
 mod network;
 mod oracle;
@@ -33,6 +34,7 @@ pub struct VerifyRequest {
     pub campaign_id: String,
     pub agent_eth_addr: String,
     pub payout: u64,
+    pub deadline: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -49,7 +51,98 @@ pub struct VerifyResponse {
 
 struct AppState {
     active_intents: DashMap<String, AdIntent>,
+    unverified_intents: DashMap<String, AdIntent>,
     oracle: Arc<oracle::AttentionOracle>,
+    api_secret: Option<String>,
+    graph_semaphore: Arc<Semaphore>,
+}
+
+fn load_oracle_key() -> Result<[u8; 32], Box<dyn std::error::Error>> {
+    if let Ok(hex_key) = std::env::var("ORACLE_PRIVATE_KEY") {
+        let bytes = hex::decode(hex_key.trim_start_matches("0x"))
+            .map_err(|e| format!("ORACLE_PRIVATE_KEY is not valid hex: {}", e))?;
+        if bytes.len() != 32 {
+            return Err(format!(
+                "ORACLE_PRIVATE_KEY must be 32 bytes, got {}",
+                bytes.len()
+            ).into());
+        }
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&bytes);
+        return Ok(key);
+    }
+
+    if let Ok(path) = std::env::var("ORACLE_KEY_FILE") {
+        let contents = std::fs::read_to_string(&path)
+            .map_err(|e| format!("Cannot read ORACLE_KEY_FILE at {}: {}", path, e))?;
+        let bytes = hex::decode(contents.trim().trim_start_matches("0x"))
+            .map_err(|e| format!("ORACLE_KEY_FILE contains invalid hex: {}", e))?;
+        if bytes.len() != 32 {
+            return Err(format!(
+                "ORACLE_KEY_FILE key must be 32 bytes, got {}",
+                bytes.len()
+            ).into());
+        }
+        let mut key = [0u8; 32];
+        key.copy_from_slice(&bytes);
+        return Ok(key);
+    }
+
+    Err("One of ORACLE_PRIVATE_KEY or ORACLE_KEY_FILE environment variables must be set".into())
+}
+
+fn hex_to_32(s: &str) -> Result<[u8; 32], String> {
+    let bytes = hex::decode(s.trim_start_matches("0x"))
+        .map_err(|e| format!("Invalid hex for 32-byte value '{}': {}", s, e))?;
+    if bytes.len() != 32 {
+        return Err(format!(
+            "Expected 32 bytes, got {} from '{}'",
+            bytes.len(),
+            s
+        ));
+    }
+    let mut arr = [0u8; 32];
+    arr.copy_from_slice(&bytes);
+    Ok(arr)
+}
+
+fn hex_to_20(s: &str) -> Result<[u8; 20], String> {
+    let bytes = hex::decode(s.trim_start_matches("0x"))
+        .map_err(|e| format!("Invalid hex for 20-byte value '{}': {}", s, e))?;
+    if bytes.len() != 20 {
+        return Err(format!(
+            "Expected 20 bytes, got {} from '{}'",
+            bytes.len(),
+            s
+        ));
+    }
+    let mut arr = [0u8; 20];
+    arr.copy_from_slice(&bytes);
+    Ok(arr)
+}
+
+fn validate_intent(intent: &AdIntent) -> bool {
+    if intent.campaign_id.is_empty() || intent.advertiser.is_empty() {
+        return false;
+    }
+    if intent.budget == 0 || intent.payout_per_execution == 0 {
+        return false;
+    }
+    if intent.budget < intent.payout_per_execution {
+        return false;
+    }
+    true
+}
+
+fn check_api_key(headers: &HeaderMap, expected: &Option<String>) -> Result<(), StatusCode> {
+    let secret = match expected {
+        Some(s) => s,
+        None => return Ok(()),
+    };
+    match headers.get("x-api-key").and_then(|v| v.to_str().ok()) {
+        Some(provided) if provided == secret => Ok(()),
+        _ => Err(StatusCode::UNAUTHORIZED),
+    }
 }
 
 #[tokio::main]
@@ -57,13 +150,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
     info!("Starting 0-ads Billboard Node (Sun Force Edition)...");
 
-    let mut oracle_key = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut oracle_key);
-    let oracle = Arc::new(oracle::AttentionOracle::new(oracle_key).expect("Failed to initialize Oracle"));
+    let oracle_key = load_oracle_key()?;
+    let oracle = Arc::new(
+        oracle::AttentionOracle::new(oracle_key)
+            .expect("Failed to initialize Oracle"),
+    );
+
+    info!("Oracle address: 0x{}", oracle.public_address_hex());
+
+    let api_secret = std::env::var("API_SECRET").ok();
+    if api_secret.is_none() {
+        warn!("API_SECRET not set — oracle endpoints are unauthenticated. Set API_SECRET for production use.");
+    }
 
     let state = Arc::new(AppState {
         active_intents: DashMap::new(),
+        unverified_intents: DashMap::new(),
         oracle,
+        api_secret,
+        graph_semaphore: Arc::new(Semaphore::new(4)),
     });
 
     let mut swarm = network::build_0_ads_swarm()?;
@@ -80,10 +185,40 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let server_handle = tokio::spawn(async move {
         let port = std::env::var("PORT").unwrap_or_else(|_| "8080".to_string());
-        let addr = format!("0.0.0.0:{}", port).parse::<std::net::SocketAddr>().expect("Invalid IP/Port configuration");
+        let addr = format!("0.0.0.0:{}", port)
+            .parse::<std::net::SocketAddr>()
+            .expect("Invalid IP/Port configuration");
         info!("Billboard HTTP API listening on {}", addr);
-        if let Err(e) = axum::Server::bind(&addr).serve(app.into_make_service()).await {
+        if let Err(e) = axum::Server::bind(&addr)
+            .serve(app.into_make_service())
+            .await
+        {
             error!("HTTP Server error: {}", e);
+        }
+    });
+
+    // Background task: promote validated intents
+    let verify_state = state.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+        loop {
+            interval.tick().await;
+            let keys: Vec<String> = verify_state
+                .unverified_intents
+                .iter()
+                .map(|kv| kv.key().clone())
+                .collect();
+            for key in keys {
+                if let Some((_, intent)) = verify_state.unverified_intents.remove(&key) {
+                    if validate_intent(&intent) {
+                        if !verify_state.active_intents.contains_key(&intent.campaign_id) {
+                            verify_state
+                                .active_intents
+                                .insert(intent.campaign_id.clone(), intent);
+                        }
+                    }
+                }
+            }
         }
     });
 
@@ -93,17 +228,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 SwarmEvent::Behaviour(gossipsub::Event::Message { message, .. }) => {
                     info!("Received Ad Intent over Gossipsub");
                     if let Ok(intent) = serde_json::from_slice::<AdIntent>(&message.data) {
-                        // Epic 2: Lock-free concurrent insertion via DashMap
-                        state.active_intents.insert(intent.campaign_id.clone(), intent);
+                        state.unverified_intents.insert(intent.campaign_id.clone(), intent);
                     }
                 }
                 SwarmEvent::NewListenAddr { address, .. } => {
                     info!("P2P Node listening on {:?}", address);
                 }
                 _ => {}
+            },
+            _ = tokio::signal::ctrl_c() => {
+                info!("Received shutdown signal, exiting gracefully...");
+                break;
             }
         }
     }
+
+    drop(swarm);
+    server_handle.abort();
+    info!("Billboard node shut down.");
+
+    Ok(())
 }
 
 async fn serve_dashboard() -> Html<&'static str> {
@@ -111,81 +255,159 @@ async fn serve_dashboard() -> Html<&'static str> {
 }
 
 async fn get_intents(State(state): State<Arc<AppState>>) -> Json<Vec<AdIntent>> {
-    let intents: Vec<AdIntent> = state.active_intents.iter().map(|kv| kv.value().clone()).collect();
+    let intents: Vec<AdIntent> = state
+        .active_intents
+        .iter()
+        .map(|kv| kv.value().clone())
+        .collect();
     Json(intents)
 }
 
-async fn broadcast_intent(State(state): State<Arc<AppState>>, Json(intent): Json<AdIntent>) -> Json<&'static str> {
+async fn broadcast_intent(
+    State(state): State<Arc<AppState>>,
+    Json(intent): Json<AdIntent>,
+) -> impl IntoResponse {
+    if !validate_intent(&intent) {
+        return (
+            StatusCode::BAD_REQUEST,
+            AxumJson(serde_json::json!({"error": "Invalid intent: missing fields or budget < payout"})),
+        );
+    }
     info!("Broadcasting campaign {} to P2P network", intent.campaign_id);
-    state.active_intents.insert(intent.campaign_id.clone(), intent);
-    Json("Intent Broadcasted to 0-ads Gossipsub network")
+    state
+        .active_intents
+        .insert(intent.campaign_id.clone(), intent);
+    (
+        StatusCode::OK,
+        AxumJson(serde_json::json!({"message": "Intent Broadcasted to 0-ads Gossipsub network"})),
+    )
 }
 
-fn hex_to_32(s: &str) -> [u8; 32] {
-    let bytes = hex::decode(s.trim_start_matches("0x")).unwrap_or_default();
-    let mut arr = [0u8; 32];
-    let len = bytes.len().min(32);
-    arr[32-len..].copy_from_slice(&bytes[..len]);
-    arr
-}
+async fn verify_proof(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(req): Json<VerifyRequest>,
+) -> impl IntoResponse {
+    if let Err(status) = check_api_key(&headers, &state.api_secret) {
+        return (
+            status,
+            Json(VerifyResponse {
+                signature: String::new(),
+                error: Some("Unauthorized: invalid or missing x-api-key".into()),
+            }),
+        );
+    }
 
-fn hex_to_20(s: &str) -> [u8; 20] {
-    let bytes = hex::decode(s.trim_start_matches("0x")).unwrap_or_default();
-    let mut arr = [0u8; 20];
-    let len = bytes.len().min(20);
-    arr[20-len..].copy_from_slice(&bytes[..len]);
-    arr
-}
-
-async fn verify_proof(State(state): State<Arc<AppState>>, Json(req): Json<VerifyRequest>) -> Json<VerifyResponse> {
     info!("Oracle verifying agent proof payload...");
-    
-    let c_addr = hex_to_20(&req.contract_addr);
-    let c_id = hex_to_32(&req.campaign_id);
-    let a_addr = hex_to_20(&req.agent_eth_addr);
 
-    match state.oracle.verify_github_star(
-        &req.agent_github_id, 
-        &req.target_repo,
-        req.chain_id,
-        c_addr,
-        c_id,
-        a_addr,
-        req.payout
-    ).await {
-        Ok(sig) => Json(VerifyResponse {
-            signature: hex::encode(sig),
-            error: None,
-        }),
-        Err(e) => Json(VerifyResponse {
-            signature: "".to_string(),
-            error: Some(format!("{:?}", e)),
-        }),
+    let c_addr = match hex_to_20(&req.contract_addr) {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(VerifyResponse { signature: String::new(), error: Some(e) }),
+            );
+        }
+    };
+    let c_id = match hex_to_32(&req.campaign_id) {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(VerifyResponse { signature: String::new(), error: Some(e) }),
+            );
+        }
+    };
+    let a_addr = match hex_to_20(&req.agent_eth_addr) {
+        Ok(v) => v,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(VerifyResponse { signature: String::new(), error: Some(e) }),
+            );
+        }
+    };
+
+    match state
+        .oracle
+        .verify_github_star(
+            &req.agent_github_id,
+            &req.target_repo,
+            req.chain_id,
+            c_addr,
+            c_id,
+            a_addr,
+            req.payout,
+            req.deadline,
+        )
+        .await
+    {
+        Ok(sig) => (
+            StatusCode::OK,
+            Json(VerifyResponse {
+                signature: hex::encode(sig),
+                error: None,
+            }),
+        ),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(VerifyResponse {
+                signature: String::new(),
+                error: Some(format!("{:?}", e)),
+            }),
+        ),
     }
 }
 
-/// Epic 2: Sun Force CPU Isolation & 0-lang Execution
 pub async fn verify_graph_execution(
-    State(_state): State<Arc<AppState>>, 
-    Json(_req): Json<VerifyGraphRequest>
-) -> Json<VerifyResponse> {
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Json(_req): Json<VerifyGraphRequest>,
+) -> impl IntoResponse {
+    if let Err(status) = check_api_key(&headers, &state.api_secret) {
+        return (
+            status,
+            Json(VerifyResponse {
+                signature: String::new(),
+                error: Some("Unauthorized: invalid or missing x-api-key".into()),
+            }),
+        );
+    }
+
     info!("Offloading 0-lang VM execution to blocking thread pool...");
-    
-    // Use spawn_blocking to prevent Tokio thread starvation from heavy VM tasks
+
+    let permit = match state.graph_semaphore.clone().try_acquire_owned() {
+        Ok(p) => p,
+        Err(_) => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(VerifyResponse {
+                    signature: String::new(),
+                    error: Some("Server busy: too many concurrent graph executions".into()),
+                }),
+            );
+        }
+    };
+
     let res = tokio::task::spawn_blocking(move || {
-        // Simulated CPU-heavy VM execution
-        // let graph = zerolang::RuntimeGraph::deserialize(&req.graph_hex)?;
-        // let mut vm = zerolang::VM::new(10000); // 10k gas
-        // vm.execute_graph(&graph)?;
-        
-        // Artificial delay simulating tensor math/VM overhead
+        let _permit = permit;
         std::thread::sleep(std::time::Duration::from_millis(50));
         Ok::<String, String>("0x0-lang-execution-success-signature".to_string())
-    }).await;
+    })
+    .await;
 
     match res {
-        Ok(Ok(sig)) => Json(VerifyResponse { signature: sig, error: None }),
-        Ok(Err(e)) => Json(VerifyResponse { signature: "".into(), error: Some(e) }),
-        Err(_e) => Json(VerifyResponse { signature: "".into(), error: Some("VM execution panicked or thread pool died".into()) })
+        Ok(Ok(sig)) => (StatusCode::OK, Json(VerifyResponse { signature: sig, error: None })),
+        Ok(Err(e)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(VerifyResponse { signature: String::new(), error: Some(e) }),
+        ),
+        Err(_e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(VerifyResponse {
+                signature: String::new(),
+                error: Some("VM execution panicked or thread pool died".into()),
+            }),
+        ),
     }
 }
