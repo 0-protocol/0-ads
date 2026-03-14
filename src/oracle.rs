@@ -1,4 +1,4 @@
-use zerolang::{Tensor, VMError};
+use zerolang::VMError;
 use reqwest::Client;
 use serde_json::Value;
 
@@ -25,7 +25,7 @@ impl AttentionOracle {
         }
     }
 
-    fn sign_payload(&self, agent_id: &str, target: &str, confidence: f32) -> Vec<u8> {
+    fn sign_payload(&self, _agent_id: &str, _target: &str, _confidence: f32) -> Vec<u8> {
         // In production, this uses k256 to sign an EIP-712 structured payload.
         // It returns the signature bytes which 0-lang's `Op::VerifySignature` will accept.
         vec![0x01, 0x02, 0x03] // stub

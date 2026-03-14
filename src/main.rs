@@ -3,11 +3,12 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use libp2p::{gossipsub, SwarmEvent};
+use libp2p::{gossipsub, swarm::SwarmEvent};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use futures::StreamExt;
 use tokio::sync::RwLock;
-use tracing::{info, warn};
+use tracing::info;
 
 mod network;
 mod oracle;
