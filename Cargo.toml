@@ -1,0 +1,18 @@
+[package]
+name = "zero-ads-node"
+version = "0.1.0"
+edition = "2021"
+description = "The P2P Billboard Node for the 0-ads Attention Network"
+authors = ["0-protocol <sjhddh>"]
+
+[dependencies]
+zerolang = { git = "https://github.com/0-protocol/0-lang", branch = "main" }
+libp2p = { version = "0.53", features = ["tokio", "gossipsub", "tcp", "noise", "yamux", "macros"] }
+tokio = { version = "1.32", features = ["full"] }
+axum = "0.6"
+tower-http = { version = "0.4", features = ["cors"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+reqwest = { version = "0.11", features = ["json", "rustls-tls"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
