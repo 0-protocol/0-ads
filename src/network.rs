@@ -1,3 +1,4 @@
+use libp2p::core::Transport;
 use libp2p::{
     gossipsub::{self, MessageAuthenticity, ValidationMode},
     identity, PeerId, Swarm,
