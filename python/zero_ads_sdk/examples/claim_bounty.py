@@ -1,5 +1,6 @@
 import requests
 from web3 import Web3
+import time
 import os
 
 """
@@ -20,13 +21,14 @@ Flow:
 ORACLE_URL = "https://ads.0-protocol.org/api/v1/oracle/verify"
 RPC_URL = "https://sepolia.base.org"
 CHAIN_ID = 84532
-CONTRACT_ADDRESS = "0x8871169e040c7a840EB063AC9e3a31D44De956A2"
+CONTRACT_ADDRESS = "0x8a2aD6bC4A240515c49035bE280BacB7CA94afC4"
 
 # Minimal ABI for AdEscrow claim
 ABI = [
     {
         "inputs": [
             {"internalType": "bytes32", "name": "campaignId", "type": "bytes32"},
+            {"internalType": "uint256", "name": "deadline", "type": "uint256"},
             {"internalType": "bytes", "name": "oracleSignature", "type": "bytes"}
         ],
         "name": "claimPayout",
@@ -43,7 +45,12 @@ def claim_bounty(campaign_id_hex, agent_private_key, github_id, repo, payout_amo
     agent_address = agent_account.address
     print(f"🤖 Agent Identity: {agent_address}")
 
-    print("\n[2] Requesting Cryptographic Proof from 0-ads Oracle...")
+    print("\n[2] Generating Wallet Ownership Proof...")
+    from eth_account.messages import encode_defunct
+    msg = encode_defunct(text=f"0-ads-wallet-bind:{github_id}")
+    wallet_sig = agent_account.sign_message(msg).signature.hex()
+
+    print("\n[3] Requesting Cryptographic Proof from 0-ads Oracle...")
     payload = {
         "agent_github_id": github_id,
         "target_repo": repo,
@@ -51,7 +58,9 @@ def claim_bounty(campaign_id_hex, agent_private_key, github_id, repo, payout_amo
         "contract_addr": CONTRACT_ADDRESS,
         "campaign_id": campaign_id_hex,
         "agent_eth_addr": agent_address,
-        "payout": payout_amount
+        "payout": payout_amount,
+        "deadline": int(time.time()) + 3600,
+        "wallet_sig": wallet_sig
     }
 
     try:
@@ -73,13 +82,14 @@ def claim_bounty(campaign_id_hex, agent_private_key, github_id, repo, payout_amo
     print(f"✅ Oracle verified action and signed proof!")
     print(f"🔑 Signature: {signature[:14]}...{signature[-10:]}")
 
-    print("\n[3] Submitting Proof to Base Sepolia L2 AdEscrow Contract...")
+    print("\n[4] Submitting Proof to Base Sepolia L2 AdEscrow Contract...")
     contract = w3.eth.contract(address=CONTRACT_ADDRESS, abi=ABI)
 
     try:
         # Build transaction
         tx = contract.functions.claimPayout(
             bytes.fromhex(campaign_id_hex.replace("0x", "")),
+            res_data["deadline"],
             bytes.fromhex(signature.replace("0x", ""))
         ).build_transaction({
             'from': agent_address,

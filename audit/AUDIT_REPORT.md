@@ -21,7 +21,7 @@ Key improvements in the V3 round:
 
 **Overall Risk Rating: LOW** (downgraded from LOW-MEDIUM)
 
-The deployed contract at `0x8871169e040c7a840EB063AC9e3a31D44De956A2` on Base Sepolia is the **pre-fix version**. The remediated EVM code has not yet been redeployed. The Solana program has not been deployed to any network.
+The deployed contract at `0x8a2aD6bC4A240515c49035bE280BacB7CA94afC4` on Base Sepolia is the **pre-fix version**. The remediated EVM code has not yet been redeployed. The Solana program has not been deployed to any network.
 
 ---
 

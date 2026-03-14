@@ -68,7 +68,7 @@ We have successfully completed the end-to-end architecture for the Agent-Native 
 4. **On-Chain Settlement**: The Agent submits the signature to the `AdEscrow` smart contract to claim the USDC payout.
 
 ### 📜 Smart Contracts (Base Sepolia Testnet)
-- **AdEscrow.sol**: `0x8871169e040c7a840EB063AC9e3a31D44De956A2`
+- **AdEscrow.sol**: `0x8a2aD6bC4A240515c49035bE280BacB7CA94afC4`
 - Network: Base Sepolia L2
 - Status: **Open for Community Audit**
 
