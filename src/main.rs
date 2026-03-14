@@ -49,7 +49,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .with_state(api_state);
 
     let server_handle = tokio::spawn(async move {
-        let addr = std::net::SocketAddr::from(([0, 0, 0, 0], 8080));
+        let port = std::env::var("PORT").unwrap_or_else(|_| "8080".to_string());
+        let addr = format!("0.0.0.0:{}", port).parse::<std::net::SocketAddr>().unwrap();
         info!("Billboard HTTP API listening on {}", addr);
         axum::Server::bind(&addr)
             .serve(app.into_make_service())
