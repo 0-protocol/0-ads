@@ -3,7 +3,7 @@ FROM rust:latest AS builder
 WORKDIR /usr/src/app
 
 # Install build dependencies
-RUN apt-get update && apt-get install -y pkg-config libssl-dev cmake git capnproto
+RUN apt-get update && apt-get install -y pkg-config libssl-dev cmake git capnproto capnproto
 
 COPY Cargo.toml ./
 COPY src ./src
