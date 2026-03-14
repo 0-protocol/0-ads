@@ -22,7 +22,7 @@ pub fn build_0_ads_swarm() -> Result<Swarm<gossipsub::Behaviour>, Box<dyn std::e
     let ad_topic = gossipsub::IdentTopic::new("0-ads-intents-v1");
     gossipsub.subscribe(&ad_topic)?;
 
-    let mut swarm = libp2p::swarm::SwarmBuilder::with_existing_identity(local_key)
+    let mut swarm = libp2p::SwarmBuilder::with_existing_identity(local_key)
         .with_tokio()
         .with_tcp(
             libp2p::tcp::Config::default(),
