@@ -6,6 +6,7 @@ WORKDIR /usr/src/app
 RUN apt-get update && apt-get install -y pkg-config libssl-dev cmake git
 
 COPY Cargo.toml ./
+COPY vendor ./vendor
 COPY src ./src
 
 RUN cargo build --release
