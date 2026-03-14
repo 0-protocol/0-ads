@@ -47,16 +47,26 @@ contract AdEscrow {
 
     function claimPayout(
         bytes32 campaignId,
-        bytes memory oracleSignature // Must be signed by the Campaign's Oracle
+        bytes memory oracleSignature
     ) external {
         Campaign storage c = campaigns[campaignId];
         require(c.budget >= c.payout, "Campaign empty");
         require(!hasClaimed[campaignId][msg.sender], "Agent already claimed");
 
-        // Verify that the Oracle signed that this Agent successfully completed the action
-        // Hash: keccak256(abi.encodePacked(campaignId, msg.sender, c.verificationGraphHash, uint8(1)))
-        bytes32 payloadHash = keccak256(abi.encodePacked(campaignId, msg.sender, c.verificationGraphHash, uint8(1)));
-        address signer = payloadHash.toEthSignedMessageHash().recover(oracleSignature);
+        // Epic 1: Sun Force Cryptographic Audit - Replay Attack Prevention
+        // Verify Oracle signature with strictly aligned abi.encode containing:
+        // Chain ID (prevent cross-chain), Address (prevent cross-contract), Campaign, Agent, Payout
+        bytes32 payloadHash = keccak256(abi.encode(
+            block.chainid,
+            address(this),
+            campaignId,
+            msg.sender,
+            c.payout
+        ));
+
+        // Enforce Ethereum Signed Message format
+        bytes32 ethSignedMessageHash = payloadHash.toEthSignedMessageHash();
+        address signer = ethSignedMessageHash.recover(oracleSignature);
         
         require(signer == c.oracle, "Invalid Oracle Signature");
 

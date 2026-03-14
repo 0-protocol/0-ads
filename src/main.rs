@@ -28,6 +28,12 @@ pub struct AdIntent {
 pub struct VerifyRequest {
     pub agent_github_id: String,
     pub target_repo: String,
+    // Add required cryptographic binding fields
+    pub chain_id: u64,
+    pub contract_addr: String, // hex encoded
+    pub campaign_id: String,   // hex encoded
+    pub agent_eth_addr: String, // hex encoded
+    pub payout: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -48,7 +54,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut oracle_key = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut oracle_key);
-    let oracle = Arc::new(oracle::AttentionOracle::new(oracle_key));
+    let oracle = Arc::new(oracle::AttentionOracle::new(oracle_key).expect("Failed to initialize Oracle"));
 
     let state = Arc::new(AppState {
         active_intents: RwLock::new(Vec::new()),
@@ -64,7 +70,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/v1/intents", get(get_intents))
         .route("/api/v1/intents/broadcast", post(broadcast_intent))
         .route("/api/v1/oracle/verify", post(verify_proof))
-        .route("/api/v1/oracle/execute_graph", post(verify_graph_execution))
         .with_state(api_state);
 
     let server_handle = tokio::spawn(async move {
@@ -112,9 +117,38 @@ async fn broadcast_intent(State(state): State<Arc<AppState>>, Json(intent): Json
     Json("Intent Broadcasted to 0-ads Gossipsub network")
 }
 
+fn hex_to_32(s: &str) -> [u8; 32] {
+    let bytes = hex::decode(s.trim_start_matches("0x")).unwrap_or_default();
+    let mut arr = [0u8; 32];
+    let len = bytes.len().min(32);
+    arr[32-len..].copy_from_slice(&bytes[..len]);
+    arr
+}
+
+fn hex_to_20(s: &str) -> [u8; 20] {
+    let bytes = hex::decode(s.trim_start_matches("0x")).unwrap_or_default();
+    let mut arr = [0u8; 20];
+    let len = bytes.len().min(20);
+    arr[20-len..].copy_from_slice(&bytes[..len]);
+    arr
+}
+
 async fn verify_proof(State(state): State<Arc<AppState>>, Json(req): Json<VerifyRequest>) -> Json<VerifyResponse> {
     info!("Oracle verifying agent proof payload...");
-    match state.oracle.verify_github_star(&req.agent_github_id, &req.target_repo).await {
+    
+    let c_addr = hex_to_20(&req.contract_addr);
+    let c_id = hex_to_32(&req.campaign_id);
+    let a_addr = hex_to_20(&req.agent_eth_addr);
+
+    match state.oracle.verify_github_star(
+        &req.agent_github_id, 
+        &req.target_repo,
+        req.chain_id,
+        c_addr,
+        c_id,
+        a_addr,
+        req.payout
+    ).await {
         Ok(sig) => Json(VerifyResponse {
             signature: hex::encode(sig),
             error: None,
@@ -124,33 +158,4 @@ async fn verify_proof(State(state): State<Arc<AppState>>, Json(req): Json<Verify
             error: Some(format!("{:?}", e)),
         }),
     }
-}
-
-// --- Epic 2: 0-lang Execution Engine Integration ---
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct VerifyGraphRequest {
-    pub graph_hex: String,
-    pub agent_id: String,
-}
-
-pub async fn verify_graph_execution(State(state): State<Arc<AppState>>, Json(req): Json<VerifyGraphRequest>) -> Json<VerifyResponse> {
-    info!("Running 0-lang VM execution for graph...");
-    // 1. Decode graph
-    // let graph_bytes = hex::decode(&req.graph_hex).unwrap();
-    // let graph = zerolang::RuntimeGraph::deserialize(&graph_bytes);
-    
-    // 2. Initialize VM
-    // let mut vm = zerolang::VM::new(10000); // 10k gas
-    
-    // 3. Execute
-    // match vm.execute_graph(&graph) {
-    //    Ok(outputs) => { ... }
-    //    Err(e) => { ... }
-    // }
-    
-    // For now, return mock pending signature until VM state syncs
-    Json(VerifyResponse {
-        signature: "0x0-lang-execution-success-signature".to_string(),
-        error: None,
-    })
 }
