@@ -3,7 +3,7 @@ FROM rust:1.76-slim AS builder
 WORKDIR /usr/src/app
 
 # Install build dependencies
-RUN apt-get update && apt-get install -y pkg-config libssl-dev cmake
+RUN apt-get update && apt-get install -y pkg-config libssl-dev cmake git
 
 COPY Cargo.toml ./
 COPY src ./src
