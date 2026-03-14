@@ -21,3 +21,4 @@ k256 = { version = "0.13", features = ["ecdsa"] }
 sha3 = "0.10"
 rand = "0.8"
 hex = "0.4"
+dashmap = "5.5"

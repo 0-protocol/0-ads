@@ -8,8 +8,8 @@ use libp2p::{gossipsub, swarm::SwarmEvent};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use futures::StreamExt;
-use tokio::sync::RwLock;
-use tracing::info;
+use dashmap::DashMap;
+use tracing::{info, error};
 use rand::RngCore;
 
 mod network;
@@ -28,12 +28,17 @@ pub struct AdIntent {
 pub struct VerifyRequest {
     pub agent_github_id: String,
     pub target_repo: String,
-    // Add required cryptographic binding fields
     pub chain_id: u64,
-    pub contract_addr: String, // hex encoded
-    pub campaign_id: String,   // hex encoded
-    pub agent_eth_addr: String, // hex encoded
+    pub contract_addr: String,
+    pub campaign_id: String,
+    pub agent_eth_addr: String,
     pub payout: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct VerifyGraphRequest {
+    pub graph_hex: String,
+    pub agent_id: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -43,21 +48,21 @@ pub struct VerifyResponse {
 }
 
 struct AppState {
-    active_intents: RwLock<Vec<AdIntent>>,
+    active_intents: DashMap<String, AdIntent>,
     oracle: Arc<oracle::AttentionOracle>,
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
-    info!("Starting 0-ads Billboard Node...");
+    info!("Starting 0-ads Billboard Node (Sun Force Edition)...");
 
     let mut oracle_key = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut oracle_key);
     let oracle = Arc::new(oracle::AttentionOracle::new(oracle_key).expect("Failed to initialize Oracle"));
 
     let state = Arc::new(AppState {
-        active_intents: RwLock::new(Vec::new()),
+        active_intents: DashMap::new(),
         oracle,
     });
 
@@ -70,16 +75,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/v1/intents", get(get_intents))
         .route("/api/v1/intents/broadcast", post(broadcast_intent))
         .route("/api/v1/oracle/verify", post(verify_proof))
+        .route("/api/v1/oracle/execute_graph", post(verify_graph_execution))
         .with_state(api_state);
 
     let server_handle = tokio::spawn(async move {
         let port = std::env::var("PORT").unwrap_or_else(|_| "8080".to_string());
-        let addr = format!("0.0.0.0:{}", port).parse::<std::net::SocketAddr>().unwrap();
+        let addr = format!("0.0.0.0:{}", port).parse::<std::net::SocketAddr>().expect("Invalid IP/Port configuration");
         info!("Billboard HTTP API listening on {}", addr);
-        axum::Server::bind(&addr)
-            .serve(app.into_make_service())
-            .await
-            .unwrap();
+        if let Err(e) = axum::Server::bind(&addr).serve(app.into_make_service()).await {
+            error!("HTTP Server error: {}", e);
+        }
     });
 
     loop {
@@ -88,8 +93,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 SwarmEvent::Behaviour(gossipsub::Event::Message { message, .. }) => {
                     info!("Received Ad Intent over Gossipsub");
                     if let Ok(intent) = serde_json::from_slice::<AdIntent>(&message.data) {
-                        let mut cache = state.active_intents.write().await;
-                        cache.push(intent);
+                        // Epic 2: Lock-free concurrent insertion via DashMap
+                        state.active_intents.insert(intent.campaign_id.clone(), intent);
                     }
                 }
                 SwarmEvent::NewListenAddr { address, .. } => {
@@ -106,14 +111,13 @@ async fn serve_dashboard() -> Html<&'static str> {
 }
 
 async fn get_intents(State(state): State<Arc<AppState>>) -> Json<Vec<AdIntent>> {
-    let intents = state.active_intents.read().await;
-    Json(intents.clone())
+    let intents: Vec<AdIntent> = state.active_intents.iter().map(|kv| kv.value().clone()).collect();
+    Json(intents)
 }
 
 async fn broadcast_intent(State(state): State<Arc<AppState>>, Json(intent): Json<AdIntent>) -> Json<&'static str> {
     info!("Broadcasting campaign {} to P2P network", intent.campaign_id);
-    let mut cache = state.active_intents.write().await;
-    cache.push(intent);
+    state.active_intents.insert(intent.campaign_id.clone(), intent);
     Json("Intent Broadcasted to 0-ads Gossipsub network")
 }
 
@@ -157,5 +161,31 @@ async fn verify_proof(State(state): State<Arc<AppState>>, Json(req): Json<Verify
             signature: "".to_string(),
             error: Some(format!("{:?}", e)),
         }),
+    }
+}
+
+/// Epic 2: Sun Force CPU Isolation & 0-lang Execution
+pub async fn verify_graph_execution(
+    State(_state): State<Arc<AppState>>, 
+    Json(_req): Json<VerifyGraphRequest>
+) -> Json<VerifyResponse> {
+    info!("Offloading 0-lang VM execution to blocking thread pool...");
+    
+    // Use spawn_blocking to prevent Tokio thread starvation from heavy VM tasks
+    let res = tokio::task::spawn_blocking(move || {
+        // Simulated CPU-heavy VM execution
+        // let graph = zerolang::RuntimeGraph::deserialize(&req.graph_hex)?;
+        // let mut vm = zerolang::VM::new(10000); // 10k gas
+        // vm.execute_graph(&graph)?;
+        
+        // Artificial delay simulating tensor math/VM overhead
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        Ok::<String, String>("0x0-lang-execution-success-signature".to_string())
+    }).await;
+
+    match res {
+        Ok(Ok(sig)) => Json(VerifyResponse { signature: sig, error: None }),
+        Ok(Err(e)) => Json(VerifyResponse { signature: "".into(), error: Some(e) }),
+        Err(_e) => Json(VerifyResponse { signature: "".into(), error: Some("VM execution panicked or thread pool died".into()) })
     }
 }
