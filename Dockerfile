@@ -1,24 +1,33 @@
-FROM rust:latest AS builder
+FROM rust:1.82-bookworm AS builder
 
 WORKDIR /usr/src/app
 
-# Install build dependencies
-RUN apt-get update && apt-get install -y pkg-config libssl-dev cmake git capnproto
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends pkg-config libssl-dev cmake git capnproto && \
+    rm -rf /var/lib/apt/lists/*
 
-COPY Cargo.toml ./
+COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 
-RUN cargo build --release
+RUN cargo build --release --locked
 
-# Runtime image
+# Minimal runtime image
 FROM debian:bookworm-slim
 
-RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ca-certificates && \
+    rm -rf /var/lib/apt/lists/* && \
+    groupadd -r zeroads && \
+    useradd -r -g zeroads -s /sbin/nologin zeroads
 
 COPY --from=builder /usr/src/app/target/release/zero-ads-node /usr/local/bin/zero-ads-node
 
-# Railway provides $PORT
+USER zeroads
+
 ENV PORT=8080
 EXPOSE 8080
+
+# Fail-closed: require auth in container deployments
+ENV REQUIRE_AUTH=true
 
 CMD ["zero-ads-node"]

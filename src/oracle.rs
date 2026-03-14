@@ -52,11 +52,55 @@ impl AttentionOracle {
             .expect("Oracle key must be valid at this point");
         let verifying_key = VerifyingKey::from(&signing_key);
         let pubkey_bytes = verifying_key.to_encoded_point(false);
-        let pubkey_uncompressed = &pubkey_bytes.as_bytes()[1..]; // skip 0x04 prefix
+        let pubkey_uncompressed = &pubkey_bytes.as_bytes()[1..];
         let mut hasher = Keccak256::new();
         hasher.update(pubkey_uncompressed);
         let hash = hasher.finalize();
         hex::encode(&hash[12..])
+    }
+
+    /// Verifies wallet ownership by recovering the signer from a personal_sign
+    /// over the message "0-ads-wallet-bind:{github_id}" and checking it matches
+    /// the claimed agent_eth_addr.
+    pub fn verify_wallet_ownership(
+        agent_github_id: &str,
+        agent_eth_addr: [u8; 20],
+        wallet_sig: &[u8],
+    ) -> Result<(), String> {
+        if wallet_sig.len() != 65 {
+            return Err("Wallet signature must be 65 bytes (r + s + v)".into());
+        }
+
+        let challenge = format!("0-ads-wallet-bind:{}", agent_github_id);
+        let msg_bytes = challenge.as_bytes();
+
+        let prefix = format!("\x19Ethereum Signed Message:\n{}", msg_bytes.len());
+        let mut hasher = Keccak256::new();
+        hasher.update(prefix.as_bytes());
+        hasher.update(msg_bytes);
+        let msg_hash = hasher.finalize();
+
+        let sig = Signature::from_slice(&wallet_sig[..64])
+            .map_err(|_| "Invalid wallet signature format")?;
+        let v = wallet_sig[64];
+        let rec_id = RecoveryId::from_byte(if v >= 27 { v - 27 } else { v })
+            .ok_or("Invalid recovery ID in wallet signature")?;
+
+        let recovered = VerifyingKey::recover_from_prehash(msg_hash.as_slice(), &sig, rec_id)
+            .map_err(|_| "Failed to recover signer from wallet signature")?;
+
+        let pubkey_bytes = recovered.to_encoded_point(false);
+        let pubkey_uncompressed = &pubkey_bytes.as_bytes()[1..];
+        let mut addr_hasher = Keccak256::new();
+        addr_hasher.update(pubkey_uncompressed);
+        let hash = addr_hasher.finalize();
+        let recovered_addr = &hash[12..];
+
+        if recovered_addr != agent_eth_addr {
+            return Err("Wallet signature does not match claimed agent address".into());
+        }
+
+        Ok(())
     }
 
     pub async fn verify_github_star(
@@ -109,7 +153,6 @@ impl AttentionOracle {
         }
     }
 
-    /// Constructs an ABI-encoded payload matching the Solidity contract and signs it.
     /// Payload: abi.encode(chainid, address(this), campaignId, msg.sender, payout, deadline)
     fn sign_payout(
         &self,
@@ -125,30 +168,24 @@ impl AttentionOracle {
 
         let mut encoded = Vec::with_capacity(32 * 6);
 
-        // 1. chainid (uint256)
         let mut chain_id_bytes = [0u8; 32];
         chain_id_bytes[24..32].copy_from_slice(&chain_id.to_be_bytes());
         encoded.extend_from_slice(&chain_id_bytes);
 
-        // 2. contract address (address, right-aligned)
         let mut contract_bytes = [0u8; 32];
         contract_bytes[12..32].copy_from_slice(&contract_addr);
         encoded.extend_from_slice(&contract_bytes);
 
-        // 3. campaign_id (bytes32)
         encoded.extend_from_slice(&campaign_id);
 
-        // 4. agent address (address, right-aligned)
         let mut agent_bytes = [0u8; 32];
         agent_bytes[12..32].copy_from_slice(&agent_eth_addr);
         encoded.extend_from_slice(&agent_bytes);
 
-        // 5. payout (uint256)
         let mut payout_bytes = [0u8; 32];
         payout_bytes[24..32].copy_from_slice(&payout.to_be_bytes());
         encoded.extend_from_slice(&payout_bytes);
 
-        // 6. deadline (uint256)
         let mut deadline_bytes = [0u8; 32];
         deadline_bytes[24..32].copy_from_slice(&deadline.to_be_bytes());
         encoded.extend_from_slice(&deadline_bytes);

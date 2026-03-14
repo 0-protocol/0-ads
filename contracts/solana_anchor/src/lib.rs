@@ -134,6 +134,20 @@ pub mod zero_ads_escrow {
     }
 }
 
+/// Strictly validates the Ed25519 program instruction that must precede this instruction.
+///
+/// Ed25519 instruction data layout (per Solana docs):
+///   [0]      num_signatures: u8
+///   [1]      padding: u8 (must be 0)
+///   Per signature (16 bytes header):
+///     [2..4]   signature_offset: u16
+///     [4..6]   signature_instruction_index: u16
+///     [6..8]   public_key_offset: u16
+///     [8..10]  public_key_instruction_index: u16
+///     [10..12] message_data_offset: u16
+///     [12..14] message_data_size: u16
+///     [14..16] message_instruction_index: u16
+///   Then: signature (64 bytes), pubkey (32 bytes), message (variable)
 fn verify_ed25519_signature(
     instruction_sysvar: &AccountInfo,
     oracle_pubkey: &Pubkey,
@@ -143,9 +157,7 @@ fn verify_ed25519_signature(
 ) -> Result<()> {
     let current_ix_index =
         ix_sysvar::load_current_index_checked(instruction_sysvar).map_err(|_| {
-            error!(
-                "Failed to load current instruction index from sysvar"
-            );
+            error!("Failed to load current instruction index from sysvar");
             ZeroAdsError::InvalidSignature
         })?;
 
@@ -163,14 +175,38 @@ fn verify_ed25519_signature(
     );
 
     let ix_data = &ed25519_ix.data;
-    require!(ix_data.len() >= 16 + 32 + 64, ZeroAdsError::InvalidSignature);
+
+    // Minimum: 2 byte header + 16 byte per-sig header + 64 sig + 32 pubkey = 114
+    require!(ix_data.len() >= 2 + 16 + 64 + 32, ZeroAdsError::InvalidSignature);
 
     let num_signatures = ix_data[0];
     require!(num_signatures == 1, ZeroAdsError::InvalidSignature);
 
+    // Padding byte must be zero
+    require!(ix_data[1] == 0, ZeroAdsError::InvalidSignature);
+
+    let sig_offset = u16::from_le_bytes([ix_data[2], ix_data[3]]) as usize;
+    let sig_ix_index = u16::from_le_bytes([ix_data[4], ix_data[5]]);
     let pubkey_offset = u16::from_le_bytes([ix_data[6], ix_data[7]]) as usize;
+    let pubkey_ix_index = u16::from_le_bytes([ix_data[8], ix_data[9]]);
+    let msg_offset = u16::from_le_bytes([ix_data[10], ix_data[11]]) as usize;
+    let msg_len = u16::from_le_bytes([ix_data[12], ix_data[13]]) as usize;
+    let msg_ix_index = u16::from_le_bytes([ix_data[14], ix_data[15]]);
+
+    // All data must reference the same instruction (0xFFFF = current instruction's data)
+    require!(sig_ix_index == u16::MAX, ZeroAdsError::InvalidSignature);
+    require!(pubkey_ix_index == u16::MAX, ZeroAdsError::InvalidSignature);
+    require!(msg_ix_index == u16::MAX, ZeroAdsError::InvalidSignature);
+
+    // Validate bounds for signature (64 bytes)
     require!(
-        ix_data.len() >= pubkey_offset + 32,
+        ix_data.len() >= sig_offset.saturating_add(64),
+        ZeroAdsError::InvalidSignature
+    );
+
+    // Validate bounds for pubkey (32 bytes) and verify oracle identity
+    require!(
+        ix_data.len() >= pubkey_offset.saturating_add(32),
         ZeroAdsError::InvalidSignature
     );
     let ix_pubkey = &ix_data[pubkey_offset..pubkey_offset + 32];
@@ -179,17 +215,19 @@ fn verify_ed25519_signature(
         ZeroAdsError::InvalidSignature
     );
 
+    // Validate bounds for message and verify content
+    require!(
+        ix_data.len() >= msg_offset.saturating_add(msg_len),
+        ZeroAdsError::InvalidSignature
+    );
+
     let mut expected_msg = Vec::with_capacity(72);
     expected_msg.extend_from_slice(campaign_id);
     expected_msg.extend_from_slice(agent.as_ref());
     expected_msg.extend_from_slice(&payout.to_le_bytes());
 
-    let msg_offset = u16::from_le_bytes([ix_data[10], ix_data[11]]) as usize;
-    let msg_len = u16::from_le_bytes([ix_data[8], ix_data[9]]) as usize;
-    require!(
-        ix_data.len() >= msg_offset + msg_len,
-        ZeroAdsError::InvalidSignature
-    );
+    require!(msg_len == expected_msg.len(), ZeroAdsError::InvalidSignature);
+
     let ix_msg = &ix_data[msg_offset..msg_offset + msg_len];
     require!(ix_msg == expected_msg.as_slice(), ZeroAdsError::InvalidSignature);
 
@@ -209,7 +247,11 @@ pub struct CreateCampaign<'info> {
     pub campaign: Account<'info, CampaignState>,
     #[account(mut)]
     pub advertiser: Signer<'info>,
-    #[account(mut)]
+    #[account(
+        mut,
+        constraint = advertiser_token_account.owner == advertiser.key(),
+        constraint = advertiser_token_account.mint == token_mint.key(),
+    )]
     pub advertiser_token_account: Account<'info, TokenAccount>,
     #[account(
         init,
@@ -232,7 +274,11 @@ pub struct ClaimPayout<'info> {
     pub campaign: Account<'info, CampaignState>,
     #[account(mut)]
     pub agent: Signer<'info>,
-    #[account(mut)]
+    #[account(
+        mut,
+        constraint = agent_token_account.owner == agent.key(),
+        constraint = agent_token_account.mint == vault_token_account.mint,
+    )]
     pub agent_token_account: Account<'info, TokenAccount>,
     #[account(
         mut,
@@ -265,7 +311,11 @@ pub struct CancelCampaign<'info> {
     pub campaign: Account<'info, CampaignState>,
     #[account(mut)]
     pub advertiser: Signer<'info>,
-    #[account(mut)]
+    #[account(
+        mut,
+        constraint = advertiser_token_account.owner == advertiser.key(),
+        constraint = advertiser_token_account.mint == vault_token_account.mint,
+    )]
     pub advertiser_token_account: Account<'info, TokenAccount>,
     #[account(
         mut,

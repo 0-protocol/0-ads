@@ -9,7 +9,7 @@ use libp2p::{gossipsub, swarm::SwarmEvent};
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use futures::StreamExt;
 use dashmap::DashMap;
 use parking_lot::Mutex;
@@ -18,6 +18,10 @@ use tracing::{info, warn, error};
 
 mod network;
 mod oracle;
+
+const MAX_ACTIVE_INTENTS: usize = 10_000;
+const MAX_UNVERIFIED_INTENTS: usize = 5_000;
+const MAX_SIGNATURE_DEADLINE_SECS: u64 = 3600; // 1 hour max TTL
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AdIntent {
@@ -38,6 +42,8 @@ pub struct VerifyRequest {
     pub agent_eth_addr: String,
     pub payout: u64,
     pub deadline: u64,
+    /// EIP-191 personal_sign over "0-ads-wallet-bind:{agent_github_id}" proving wallet ownership.
+    pub wallet_sig: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -57,6 +63,8 @@ struct AppState {
     unverified_intents: DashMap<String, AdIntent>,
     oracle: Arc<oracle::AttentionOracle>,
     api_secret: Option<String>,
+    require_auth: bool,
+    graph_execution_enabled: bool,
     graph_semaphore: Arc<Semaphore>,
     rate_limiter: Arc<SlidingWindowRateLimiter>,
 }
@@ -97,13 +105,9 @@ fn load_oracle_key() -> Result<[u8; 32], Box<dyn std::error::Error>> {
 
 fn hex_to_32(s: &str) -> Result<[u8; 32], String> {
     let bytes = hex::decode(s.trim_start_matches("0x"))
-        .map_err(|e| format!("Invalid hex for 32-byte value '{}': {}", s, e))?;
+        .map_err(|e| format!("Invalid hex for 32-byte value: {}", e))?;
     if bytes.len() != 32 {
-        return Err(format!(
-            "Expected 32 bytes, got {} from '{}'",
-            bytes.len(),
-            s
-        ));
+        return Err(format!("Expected 32 bytes, got {}", bytes.len()));
     }
     let mut arr = [0u8; 32];
     arr.copy_from_slice(&bytes);
@@ -112,13 +116,9 @@ fn hex_to_32(s: &str) -> Result<[u8; 32], String> {
 
 fn hex_to_20(s: &str) -> Result<[u8; 20], String> {
     let bytes = hex::decode(s.trim_start_matches("0x"))
-        .map_err(|e| format!("Invalid hex for 20-byte value '{}': {}", s, e))?;
+        .map_err(|e| format!("Invalid hex for 20-byte value: {}", e))?;
     if bytes.len() != 20 {
-        return Err(format!(
-            "Expected 20 bytes, got {} from '{}'",
-            bytes.len(),
-            s
-        ));
+        return Err(format!("Expected 20 bytes, got {}", bytes.len()));
     }
     let mut arr = [0u8; 20];
     arr.copy_from_slice(&bytes);
@@ -138,15 +138,27 @@ fn validate_intent(intent: &AdIntent) -> bool {
     true
 }
 
-fn check_api_key(headers: &HeaderMap, expected: &Option<String>) -> Result<(), StatusCode> {
+fn check_api_key(headers: &HeaderMap, expected: &Option<String>, require_auth: bool) -> Result<(), StatusCode> {
     let secret = match expected {
         Some(s) => s,
-        None => return Ok(()),
+        None => {
+            if require_auth {
+                return Err(StatusCode::SERVICE_UNAVAILABLE);
+            }
+            return Ok(());
+        }
     };
     match headers.get("x-api-key").and_then(|v| v.to_str().ok()) {
         Some(provided) if provided == secret => Ok(()),
         _ => Err(StatusCode::UNAUTHORIZED),
     }
+}
+
+fn unix_timestamp_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 struct SlidingWindowRateLimiter {
@@ -180,6 +192,21 @@ impl SlidingWindowRateLimiter {
         timestamps.push_back(now);
         true
     }
+
+    fn evict_stale(&self) {
+        let now = Instant::now();
+        let cutoff = now - std::time::Duration::from_secs(self.window_secs * 2);
+        let stale_keys: Vec<String> = self.windows.iter()
+            .filter(|entry| {
+                let ts = entry.value().lock();
+                ts.is_empty() || ts.back().map_or(true, |t| *t < cutoff)
+            })
+            .map(|entry| entry.key().clone())
+            .collect();
+        for key in stale_keys {
+            self.windows.remove(&key);
+        }
+    }
 }
 
 #[tokio::main]
@@ -195,9 +222,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("Oracle address: 0x{}", oracle.public_address_hex());
 
+    let require_auth = std::env::var("REQUIRE_AUTH")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false);
+
     let api_secret = std::env::var("API_SECRET").ok();
+    if require_auth && api_secret.is_none() {
+        return Err("REQUIRE_AUTH is set but API_SECRET is missing. Refusing to start without authentication.".into());
+    }
     if api_secret.is_none() {
-        warn!("API_SECRET not set — oracle endpoints are unauthenticated. Set API_SECRET for production use.");
+        warn!("API_SECRET not set — oracle endpoints are unauthenticated. Set REQUIRE_AUTH=true and API_SECRET for production.");
+    }
+
+    let graph_execution_enabled = std::env::var("ENABLE_GRAPH_EXECUTION")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false);
+    if !graph_execution_enabled {
+        info!("Graph execution endpoint is DISABLED. Set ENABLE_GRAPH_EXECUTION=true to enable.");
     }
 
     let rate_limit_rpm: usize = std::env::var("ORACLE_RATE_LIMIT_RPM")
@@ -211,6 +252,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         unverified_intents: DashMap::new(),
         oracle,
         api_secret,
+        require_auth,
+        graph_execution_enabled,
         graph_semaphore: Arc::new(Semaphore::new(4)),
         rate_limiter: Arc::new(SlidingWindowRateLimiter::new(rate_limit_rpm, 60)),
     });
@@ -241,18 +284,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    // Background task: promote validated intents
+    // Background: promote validated intents + evict stale rate-limiter entries
     let verify_state = state.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+        let mut eviction_counter: u64 = 0;
         loop {
             interval.tick().await;
+            eviction_counter += 1;
+
+            // Enforce capacity on unverified intents
+            if verify_state.unverified_intents.len() > MAX_UNVERIFIED_INTENTS {
+                verify_state.unverified_intents.clear();
+                warn!("Unverified intents exceeded cap, cleared");
+            }
+
             let keys: Vec<String> = verify_state
                 .unverified_intents
                 .iter()
                 .map(|kv| kv.key().clone())
                 .collect();
             for key in keys {
+                if verify_state.active_intents.len() >= MAX_ACTIVE_INTENTS {
+                    break;
+                }
                 if let Some((_, intent)) = verify_state.unverified_intents.remove(&key) {
                     if validate_intent(&intent) {
                         if !verify_state.active_intents.contains_key(&intent.campaign_id) {
@@ -263,6 +318,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
             }
+
+            // Evict stale rate-limiter entries every ~5 minutes
+            if eviction_counter % 60 == 0 {
+                verify_state.rate_limiter.evict_stale();
+            }
         }
     });
 
@@ -271,8 +331,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             event = swarm.select_next_some() => match event {
                 SwarmEvent::Behaviour(gossipsub::Event::Message { message, .. }) => {
                     info!("Received Ad Intent over Gossipsub");
-                    if let Ok(intent) = serde_json::from_slice::<AdIntent>(&message.data) {
-                        state.unverified_intents.insert(intent.campaign_id.clone(), intent);
+                    if verify_state.unverified_intents.len() < MAX_UNVERIFIED_INTENTS {
+                        if let Ok(intent) = serde_json::from_slice::<AdIntent>(&message.data) {
+                            state.unverified_intents.insert(intent.campaign_id.clone(), intent);
+                        }
                     }
                 }
                 SwarmEvent::NewListenAddr { address, .. } => {
@@ -317,6 +379,12 @@ async fn broadcast_intent(
             AxumJson(serde_json::json!({"error": "Invalid intent: missing fields or budget < payout"})),
         );
     }
+    if state.active_intents.len() >= MAX_ACTIVE_INTENTS {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            AxumJson(serde_json::json!({"error": "Intent capacity reached"})),
+        );
+    }
     info!("Broadcasting campaign {} to P2P network", intent.campaign_id);
     state
         .active_intents
@@ -332,7 +400,7 @@ async fn verify_proof(
     headers: HeaderMap,
     Json(req): Json<VerifyRequest>,
 ) -> impl IntoResponse {
-    if let Err(status) = check_api_key(&headers, &state.api_secret) {
+    if let Err(status) = check_api_key(&headers, &state.api_secret, state.require_auth) {
         return (
             status,
             Json(VerifyResponse {
@@ -357,33 +425,70 @@ async fn verify_proof(
         );
     }
 
+    // H-01: Enforce server-side deadline bounds
+    let now = unix_timestamp_now();
+    if req.deadline <= now {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(VerifyResponse {
+                signature: String::new(),
+                error: Some("Deadline must be in the future".into()),
+            }),
+        );
+    }
+    if req.deadline > now + MAX_SIGNATURE_DEADLINE_SECS {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(VerifyResponse {
+                signature: String::new(),
+                error: Some(format!(
+                    "Deadline too far in the future (max {} seconds from now)",
+                    MAX_SIGNATURE_DEADLINE_SECS
+                )),
+            }),
+        );
+    }
+
     info!("Oracle verifying agent proof payload...");
+
+    let a_addr = match hex_to_20(&req.agent_eth_addr) {
+        Ok(v) => v,
+        Err(e) => {
+            return (StatusCode::BAD_REQUEST, Json(VerifyResponse { signature: String::new(), error: Some(e) }));
+        }
+    };
+
+    // C-02: Verify wallet ownership before signing
+    let wallet_sig_bytes = match hex::decode(req.wallet_sig.trim_start_matches("0x")) {
+        Ok(v) => v,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(VerifyResponse { signature: String::new(), error: Some("Invalid wallet_sig hex".into()) }),
+            );
+        }
+    };
+    if let Err(e) = oracle::AttentionOracle::verify_wallet_ownership(
+        &req.agent_github_id,
+        a_addr,
+        &wallet_sig_bytes,
+    ) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(VerifyResponse { signature: String::new(), error: Some(e) }),
+        );
+    }
 
     let c_addr = match hex_to_20(&req.contract_addr) {
         Ok(v) => v,
         Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(VerifyResponse { signature: String::new(), error: Some(e) }),
-            );
+            return (StatusCode::BAD_REQUEST, Json(VerifyResponse { signature: String::new(), error: Some(e) }));
         }
     };
     let c_id = match hex_to_32(&req.campaign_id) {
         Ok(v) => v,
         Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(VerifyResponse { signature: String::new(), error: Some(e) }),
-            );
-        }
-    };
-    let a_addr = match hex_to_20(&req.agent_eth_addr) {
-        Ok(v) => v,
-        Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(VerifyResponse { signature: String::new(), error: Some(e) }),
-            );
+            return (StatusCode::BAD_REQUEST, Json(VerifyResponse { signature: String::new(), error: Some(e) }));
         }
     };
 
@@ -408,13 +513,16 @@ async fn verify_proof(
                 error: None,
             }),
         ),
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(VerifyResponse {
-                signature: String::new(),
-                error: Some(format!("{:?}", e)),
-            }),
-        ),
+        Err(e) => {
+            error!("Oracle verification failed: {:?}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(VerifyResponse {
+                    signature: String::new(),
+                    error: Some("Verification failed".into()),
+                }),
+            )
+        }
     }
 }
 
@@ -423,7 +531,18 @@ pub async fn verify_graph_execution(
     headers: HeaderMap,
     Json(_req): Json<VerifyGraphRequest>,
 ) -> impl IntoResponse {
-    if let Err(status) = check_api_key(&headers, &state.api_secret) {
+    // M-01: gated behind feature flag
+    if !state.graph_execution_enabled {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(VerifyResponse {
+                signature: String::new(),
+                error: Some("Graph execution is not enabled on this node".into()),
+            }),
+        );
+    }
+
+    if let Err(status) = check_api_key(&headers, &state.api_secret, state.require_auth) {
         return (
             status,
             Json(VerifyResponse {
@@ -472,16 +591,15 @@ pub async fn verify_graph_execution(
 
     match res {
         Ok(Ok(sig)) => (StatusCode::OK, Json(VerifyResponse { signature: sig, error: None })),
-        Ok(Err(e)) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(VerifyResponse { signature: String::new(), error: Some(e) }),
-        ),
-        Err(_e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(VerifyResponse {
-                signature: String::new(),
-                error: Some("VM execution panicked or thread pool died".into()),
-            }),
-        ),
+        Ok(Err(_)) | Err(_) => {
+            error!("Graph execution failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(VerifyResponse {
+                    signature: String::new(),
+                    error: Some("Graph execution failed".into()),
+                }),
+            )
+        }
     }
 }
