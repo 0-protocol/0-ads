@@ -1,6 +1,6 @@
 # 0-ads Security Audit Report (Independent Review)
 
-- Target repository: `/Users/JiahaoRBC/Git/0-ads`
+- Target repository: `0-ads`
 - Audit date: 2026-03-14
 - Method: Static security review (Rust/EVM/Solana/dependencies/deployment)
 - Conclusion: Current version should not be used on production mainnet without remediation
