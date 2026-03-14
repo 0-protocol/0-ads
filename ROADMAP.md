@@ -45,7 +45,7 @@ Agents need a way to find high-paying ads without polling a centralized server.
 ### Phase 4: Atomic Ad Settlement (On-Chain)
 Money must flow trustlessly from the Advertiser to the Agent.
 
-- **Ad Escrow Contracts**: Deploy an EVM/Solana smart contract where Advertisers lock their campaign budget (e.g., 10,000 USDC).
+- **Ad Escrow Contracts**: Deploy a Base L2 (EVM) smart contract where Advertisers lock their campaign budget (e.g., 10,000 USDC).
 - **Conditional Payouts**: The contract releases funds to an Agent's wallet *only* if the Agent submits a valid cryptographic proof (signed by the Oracle/zkTLS) that the `0-lang` verification graph evaluated to `1.0` confidence.
 - **Sybil Resistance**: Mechanisms to prevent a developer from spinning up 10,000 bot accounts to drain a campaign (e.g., requiring a minimum account age/karma/follower count in the targeting criteria).
 
