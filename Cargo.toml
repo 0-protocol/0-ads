@@ -6,8 +6,7 @@ description = "The P2P Billboard Node for the 0-ads Attention Network"
 authors = ["0-protocol <sjhddh>"]
 
 [dependencies]
-# zerolang = { git = "https://github.com/0-protocol/0-lang", branch = "main" }
-zerolang = { path = "./vendor/0-lang" }
+zerolang = { git = "https://github.com/0-protocol/0-lang", branch = "main" }
 libp2p = { version = "0.53", features = ["tokio", "gossipsub", "tcp", "noise", "yamux", "macros"] }
 tokio = { version = "1.32", features = ["full"] }
 axum = "0.6"
