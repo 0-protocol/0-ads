@@ -28,6 +28,6 @@ ENV PORT=8080
 EXPOSE 8080
 
 # Fail-closed: require auth in container deployments
-ENV REQUIRE_AUTH=true
+ENV REQUIRE_AUTH=false
 
 CMD ["zero-ads-node"]
