@@ -13,12 +13,14 @@
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│  STATUS: LIVE ON BASE SEPOLIA TESTNET                   │
-│  CONTRACT: 0x8a2aD6bC4A240515c49035bE280BacB7CA94afC4  │
-│  CHAIN: Base L2 (Chain ID 84532)                        │
+│  STATUS: LIVE ON BASE MAINNET                           │
+│  CONTRACT: 0x0A666428F2Ce5e30ef1539205CC2BBC705467747  │
+│  CHAIN: Base L2 (Chain ID 8453)                         │
 │  AUDITED BY: LLMs cosplaying as 5 audit firms (yes rly) │
 └─────────────────────────────────────────────────────────┘
 ```
+
+> 🚨 **WARNING (USE AT YOUR OWN RISK)**: This is highly experimental, Alpha-stage software. The smart contracts, relayer backends, and agent scripts are provided "AS IS". There is an absolute possibility of zero-day exploits, bugs, or private key leaks (if you misconfigure your agent). **DO NOT** lock more USDC than you can afford to lose. **0-protocol assumes ZERO LIABILITY for any lost funds.** Read the full [DISCLAIMER.md](./DISCLAIMER.md) before proceeding.
 
 ---
 
