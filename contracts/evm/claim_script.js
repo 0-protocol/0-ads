@@ -6,7 +6,7 @@ async function main() {
   const githubId = "sjhddh";
   const repo = "0-protocol/0-lang";
   const campaignId = "0x0000000000000000000000000000000000000000000000000000000000000001";
-  const payoutAmount = 1000000; // 1 0-USD
+  const payoutAmount = 1000000; // 1 USDC
   const chainId = 84532;
   const contractAddr = "0x8a2aD6bC4A240515c49035bE280BacB7CA94afC4";
 
