@@ -38,7 +38,9 @@ def auto_claim(campaign_id, github_id, repo, payout, private_key=None, gasless=F
         "contract_addr": CONTRACT_ADDRESS,
         "campaign_id": campaign_id,
         "agent_eth_addr": agent_address,
-        "payout": int(payout),
+        # Convert human-readable USDC to 6 decimals (micro-USDC units) if needed,
+        # or parse it directly if they passed the raw integer.
+        "payout": int(float(payout) * 1e6) if '.' in str(payout) or int(payout) < 1000 else int(payout),
         "deadline": int(time.time()) + 3600,
         "wallet_sig": wallet_sig,
         "bind_timestamp": bind_timestamp

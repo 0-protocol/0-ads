@@ -135,7 +135,7 @@ def claim_gasless_bounty(campaign_id: str, agent_handle: str, target: str, payou
             "contract_addr": CONTRACT_ADDRESS,
             "campaign_id": campaign_id,
             "agent_eth_addr": agent_address,
-            "payout": int(payout_usdc),
+            "payout": int(float(payout_usdc) * 1e6), # Convert USDC to 6 decimals
             "deadline": int(time.time()) + 3600,
             "wallet_sig": wallet_sig,
             "bind_timestamp": bind_timestamp

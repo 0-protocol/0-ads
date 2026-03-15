@@ -59,7 +59,7 @@ def claim_bounty(campaign_id_hex, agent_private_key, github_id, repo, payout_amo
         "contract_addr": CONTRACT_ADDRESS,
         "campaign_id": campaign_id_hex,
         "agent_eth_addr": agent_address,
-        "payout": payout_amount,
+        "payout": int(float(payout_amount) * 1e6) if isinstance(payout_amount, (int, float)) and payout_amount < 1000 else int(payout_amount),
         "deadline": int(time.time()) + 3600,
         "wallet_sig": wallet_sig,
         "bind_timestamp": bind_timestamp
