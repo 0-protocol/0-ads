@@ -149,6 +149,8 @@ def verify_xiaohongshu_like(payload: dict) -> bool:
 
 # --- API Route ---
 
+from fastapi.responses import JSONResponse
+
 @app.post("/api/v2/oracle/verify")
 async def verify_universal_claim(payload: dict):
     task_type = payload.get("task_type", "github_star")
@@ -163,9 +165,20 @@ async def verify_universal_claim(payload: dict):
     
     # 1. Execute Modular Verification
     if not verifier(payload):
-        raise HTTPException(
-            status_code=403, 
-            detail=f"Verification failed for task: {task_type}. Action not completed."
+        # x402 / AP2 Compliance: Return 402 Payment Required indicating Proof of Intent is missing
+        # so the agent knows it must perform the action before calling this endpoint.
+        return JSONResponse(
+            status_code=402,
+            content={
+                "error": "Payment Required", 
+                "detail": f"Proof of intent missing for {task_type}. Action not completed.",
+                "x-402-contract": "0x8a2aD6bC4A240515c49035bE280BacB7CA94afC4",
+                "x-402-network": "Base Sepolia (84532)"
+            },
+            headers={
+                "x-402-contract": "0x8a2aD6bC4A240515c49035bE280BacB7CA94afC4",
+                "x-402-network": "84532"
+            }
         )
         
     # 2. Sybil Defense Layer (Example call to anti_sybil checker)
