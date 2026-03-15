@@ -45,9 +45,10 @@ def claim_bounty(campaign_id_hex, agent_private_key, github_id, repo, payout_amo
     agent_address = agent_account.address
     print(f"🤖 Agent Identity: {agent_address}")
 
-    print("\n[2] Generating Wallet Ownership Proof...")
+    print("\n[2] Generating Wallet Ownership Proof (timestamped)...")
     from eth_account.messages import encode_defunct
-    msg = encode_defunct(text=f"0-ads-wallet-bind:{github_id}")
+    bind_timestamp = int(time.time())
+    msg = encode_defunct(text=f"0-ads-wallet-bind:{github_id}:{bind_timestamp}")
     wallet_sig = agent_account.sign_message(msg).signature.hex()
 
     print("\n[3] Requesting Cryptographic Proof from 0-ads Oracle...")
@@ -60,7 +61,8 @@ def claim_bounty(campaign_id_hex, agent_private_key, github_id, repo, payout_amo
         "agent_eth_addr": agent_address,
         "payout": payout_amount,
         "deadline": int(time.time()) + 3600,
-        "wallet_sig": wallet_sig
+        "wallet_sig": wallet_sig,
+        "bind_timestamp": bind_timestamp
     }
 
     try:

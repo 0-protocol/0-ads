@@ -25,9 +25,10 @@ def auto_claim(campaign_id, github_id, repo, payout, private_key=None, gasless=F
     agent_address = agent_account.address
     print(f"💼 Agent Wallet Identity: {agent_address}")
 
-    # 2. Prove ownership of wallet identity
-    print(f"🔐 Binding Github ID '{github_id}' to Wallet...")
-    msg = encode_defunct(text=f"0-ads-wallet-bind:{github_id}")
+    # 2. Prove ownership of wallet identity (timestamped challenge for replay protection)
+    bind_timestamp = int(time.time())
+    print(f"🔐 Binding Github ID '{github_id}' to Wallet (ts={bind_timestamp})...")
+    msg = encode_defunct(text=f"0-ads-wallet-bind:{github_id}:{bind_timestamp}")
     wallet_sig = agent_account.sign_message(msg).signature.hex()
 
     payload = {
@@ -39,7 +40,8 @@ def auto_claim(campaign_id, github_id, repo, payout, private_key=None, gasless=F
         "agent_eth_addr": agent_address,
         "payout": int(payout),
         "deadline": int(time.time()) + 3600,
-        "wallet_sig": wallet_sig
+        "wallet_sig": wallet_sig,
+        "bind_timestamp": bind_timestamp
     }
 
     # 3. Request Cryptographic Oracle Proof
@@ -86,7 +88,7 @@ def auto_claim(campaign_id, github_id, repo, payout, private_key=None, gasless=F
                 print(f"💡 Use the --gasless flag to let the 0-ads network pay your gas!")
                 return
 
-            contract = w3.eth.contract(address=CONTRACT_ADDRESS, abi=[{
+            DIRECT_ABI = [{
                 "inputs": [
                     {"internalType": "bytes32", "name": "campaignId", "type": "bytes32"},
                     {"internalType": "uint256", "name": "deadline", "type": "uint256"},
@@ -96,7 +98,8 @@ def auto_claim(campaign_id, github_id, repo, payout, private_key=None, gasless=F
                 "outputs": [],
                 "stateMutability": "nonpayable",
                 "type": "function"
-            }])
+            }]
+            contract = w3.eth.contract(address=CONTRACT_ADDRESS, abi=DIRECT_ABI)
             
             tx = contract.functions.claimPayout(
                 bytes.fromhex(campaign_id.replace("0x", "")),
@@ -120,10 +123,8 @@ def auto_claim(campaign_id, github_id, repo, payout, private_key=None, gasless=F
     if not tx_hash.startswith("0x"): tx_hash = "0x" + tx_hash
     print(f"\n🎉 SUCCESS! Your AI Agent just earned programmatic money.")
     print(f"🔍 View Transaction on Basescan: https://sepolia.basescan.org/tx/{tx_hash}")
-    
-    if private_key:
-        print(f"\n🔑 KEEP THIS SAFE: Your ephemeral agent private key is: {private_key}")
-        print(f"💰 Import this to MetaMask (Base Sepolia network) to view your 0-USD!")
+    print(f"💼 Funds deposited to: {agent_address}")
+    print(f"💡 Import your wallet to MetaMask (Base Sepolia network) to view your 0-USD.")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="0-ads Autonomous Bounty Hunter")

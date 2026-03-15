@@ -508,6 +508,7 @@ dependencies = [
  "iana-time-zone",
  "js-sys",
  "num-traits",
+ "serde",
  "wasm-bindgen",
  "windows-link",
 ]
@@ -4580,6 +4581,7 @@ name = "zero-ads-node"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "chrono",
  "dashmap",
  "futures",
  "hex",

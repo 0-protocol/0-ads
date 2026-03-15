@@ -45,8 +45,11 @@ pub struct VerifyRequest {
     pub agent_eth_addr: String,
     pub payout: u64,
     pub deadline: u64,
-    /// EIP-191 personal_sign over "0-ads-wallet-bind:{agent_github_id}" proving wallet ownership.
+    /// EIP-191 personal_sign over "0-ads-wallet-bind:{agent_github_id}:{bind_timestamp}" proving wallet ownership.
     pub wallet_sig: String,
+    /// Unix timestamp included in the wallet-bind challenge for replay protection.
+    #[serde(default)]
+    pub bind_timestamp: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -65,6 +68,8 @@ pub struct AppState {
     active_intents: DashMap<String, AdIntent>,
     unverified_intents: DashMap<String, AdIntent>,
     oracle: Arc<oracle::AttentionOracle>,
+    sybil_policy: oracle::SybilPolicy,
+    sybil_client: reqwest::Client,
     api_secret: Option<String>,
     require_auth: bool,
     graph_execution_enabled: bool,
@@ -75,7 +80,11 @@ pub struct AppState {
 }
 
 fn load_oracle_key() -> Result<[u8; 32], Box<dyn std::error::Error>> {
-    if let Ok(hex_key) = std::env::var("ORACLE_PRIVATE_KEY").or_else(|_| Ok::<String, String>("0x33be6fa714a02fc089f7fc2084da8260d081c210ed04989862db1ee8cf500808".to_string())) {
+    if let Ok(hex_key) = std::env::var("ORACLE_PRIVATE_KEY") {
+        warn!(
+            "ORACLE_PRIVATE_KEY loaded from environment variable. \
+             This is insecure in production — use ORACLE_KEY_FILE instead."
+        );
         let bytes = hex::decode(hex_key.trim_start_matches("0x"))
             .map_err(|e| format!("ORACLE_PRIVATE_KEY is not valid hex: {}", e))?;
         if bytes.len() != 32 {
@@ -105,7 +114,9 @@ fn load_oracle_key() -> Result<[u8; 32], Box<dyn std::error::Error>> {
         return Ok(key);
     }
 
-    Err("One of ORACLE_PRIVATE_KEY or ORACLE_KEY_FILE environment variables must be set".into())
+    Err("ORACLE_PRIVATE_KEY or ORACLE_KEY_FILE must be set. \
+         The node refuses to start without an explicit oracle key to prevent \
+         accidental use of a well-known default in production.".into())
 }
 
 fn hex_to_32(s: &str) -> Result<[u8; 32], String> {
@@ -159,20 +170,15 @@ fn check_api_key(headers: &HeaderMap, expected: &Option<String>, require_auth: b
     }
 }
 
-fn extract_rate_key(headers: &HeaderMap, req_identifier: Option<&str>) -> String {
+fn extract_rate_key(headers: &HeaderMap, req_identifier: Option<&str>, peer_ip: Option<&str>) -> String {
     if let Some(key) = headers.get("x-api-key").and_then(|v| v.to_str().ok()) {
         return format!("apikey:{}", key);
     }
     if let Some(id) = req_identifier {
         return format!("agent:{}", id);
     }
-    if let Some(forwarded) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
-        if let Some(first_ip) = forwarded.split(',').next() {
-            return format!("ip:{}", first_ip.trim());
-        }
-    }
-    if let Some(real_ip) = headers.get("x-real-ip").and_then(|v| v.to_str().ok()) {
-        return format!("ip:{}", real_ip);
+    if let Some(ip) = peer_ip {
+        return format!("ip:{}", ip);
     }
     "anon:unknown".to_string()
 }
@@ -367,10 +373,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(Arc::new(CampaignVerifier::new(rpc_url, contract)))
     };
 
+    let sybil_policy = oracle::SybilPolicy::from_env();
+    if sybil_policy.enabled {
+        info!(
+            "Anti-sybil policy ENABLED: min_age={}d, min_followers={}, min_repos={}",
+            sybil_policy.min_account_age_days,
+            sybil_policy.min_followers,
+            sybil_policy.min_public_repos,
+        );
+    } else {
+        warn!("Anti-sybil policy is DISABLED. Set SYBIL_POLICY=on for production.");
+    }
+
+    let sybil_client = reqwest::Client::builder()
+        .user_agent("0-ads-billboard-node/1.0")
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .expect("Failed to build sybil HTTP client");
+
     let state = Arc::new(AppState {
         active_intents: DashMap::new(),
         unverified_intents: DashMap::new(),
         oracle,
+        sybil_policy,
+        sybil_client,
         api_secret,
         require_auth,
         graph_execution_enabled,
@@ -397,12 +423,49 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let addr = format!("0.0.0.0:{}", port)
             .parse::<std::net::SocketAddr>()
             .expect("Invalid IP/Port configuration");
-        info!("Billboard HTTP API listening on {}", addr);
-        if let Err(e) = axum::Server::bind(&addr)
-            .serve(app.into_make_service())
-            .await
-        {
-            error!("HTTP Server error: {}", e);
+
+        let tls_cert = std::env::var("TLS_CERT_PATH").ok();
+        let tls_key = std::env::var("TLS_KEY_PATH").ok();
+
+        match (tls_cert, tls_key) {
+            (Some(cert_path), Some(key_path)) => {
+                info!("Billboard HTTP API listening on {} with TLS", addr);
+                let rustls_config = match axum_server::tls_rustls::RustlsConfig::from_pem_file(
+                    &cert_path, &key_path,
+                ).await {
+                    Ok(cfg) => cfg,
+                    Err(e) => {
+                        error!("Failed to load TLS certificates: {}. Falling back to plain HTTP.", e);
+                        info!("Billboard HTTP API listening on {} (plain HTTP — TLS cert load failed)", addr);
+                        if let Err(e) = axum::Server::bind(&addr)
+                            .serve(app.into_make_service())
+                            .await
+                        {
+                            error!("HTTP Server error: {}", e);
+                        }
+                        return;
+                    }
+                };
+                if let Err(e) = axum_server::bind_rustls(addr, rustls_config)
+                    .serve(app.into_make_service())
+                    .await
+                {
+                    error!("HTTPS Server error: {}", e);
+                }
+            }
+            _ => {
+                warn!(
+                    "TLS_CERT_PATH and TLS_KEY_PATH not set — running plain HTTP. \
+                     This is insecure for production. Set both env vars to enable TLS."
+                );
+                info!("Billboard HTTP API listening on {} (plain HTTP)", addr);
+                if let Err(e) = axum::Server::bind(&addr)
+                    .serve(app.into_make_service())
+                    .await
+                {
+                    error!("HTTP Server error: {}", e);
+                }
+            }
         }
     });
 
@@ -415,8 +478,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             eviction_counter += 1;
 
             if verify_state.unverified_intents.len() > MAX_UNVERIFIED_INTENTS {
-                verify_state.unverified_intents.clear();
-                warn!("Unverified intents exceeded cap, cleared");
+                let overflow = verify_state.unverified_intents.len() - MAX_UNVERIFIED_INTENTS;
+                let evict_keys: Vec<String> = verify_state
+                    .unverified_intents
+                    .iter()
+                    .take(overflow)
+                    .map(|kv| kv.key().clone())
+                    .collect();
+                for key in evict_keys {
+                    verify_state.unverified_intents.remove(&key);
+                }
+                warn!("Evicted {} oldest unverified intents (LRU)", overflow);
             }
 
             let keys: Vec<String> = verify_state
@@ -511,22 +583,30 @@ async fn get_intents(State(state): State<Arc<AppState>>) -> Json<Vec<AdIntent>> 
 
 async fn broadcast_intent(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(intent): Json<AdIntent>,
 ) -> impl IntoResponse {
+    if let Err(status) = check_api_key(&headers, &state.api_secret, state.require_auth) {
+        return (
+            status,
+            AxumJson(serde_json::json!({"error": "Unauthorized: invalid or missing x-api-key"})),
+        );
+    }
+
     if !validate_intent(&intent) {
         return (
             StatusCode::BAD_REQUEST,
             AxumJson(serde_json::json!({"error": "Invalid intent: missing fields or budget < payout"})),
         );
     }
-    if state.active_intents.len() >= MAX_ACTIVE_INTENTS {
+    if state.unverified_intents.len() >= MAX_UNVERIFIED_INTENTS {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
             AxumJson(serde_json::json!({"error": "Intent capacity reached"})),
         );
     }
 
-    info!("Broadcasting campaign {} to P2P network", intent.campaign_id);
+    info!("Queuing campaign {} for on-chain verification", intent.campaign_id);
 
     if let Ok(data) = serde_json::to_vec(&intent) {
         if let Err(e) = state.gossipsub_tx.send(data) {
@@ -535,11 +615,11 @@ async fn broadcast_intent(
     }
 
     state
-        .active_intents
+        .unverified_intents
         .insert(intent.campaign_id.clone(), intent);
     (
         StatusCode::OK,
-        AxumJson(serde_json::json!({"message": "Intent Broadcasted to 0-ads Gossipsub network"})),
+        AxumJson(serde_json::json!({"message": "Intent queued for on-chain verification and Gossipsub broadcast"})),
     )
 }
 
@@ -558,7 +638,7 @@ async fn verify_proof(
         );
     }
 
-    let rate_key = extract_rate_key(&headers, Some(&req.agent_github_id));
+    let rate_key = extract_rate_key(&headers, Some(&req.agent_github_id), None);
     if !state.rate_limiter.check(&rate_key) {
         return (
             StatusCode::TOO_MANY_REQUESTS,
@@ -614,11 +694,26 @@ async fn verify_proof(
         &req.agent_github_id,
         a_addr,
         &wallet_sig_bytes,
+        req.bind_timestamp,
     ) {
         return (
             StatusCode::FORBIDDEN,
             Json(VerifyResponse { signature: String::new(), error: Some(e) }),
         );
+    }
+
+    match state.sybil_policy.check(&state.sybil_client, &req.agent_github_id).await {
+        oracle::SybilVerdict::Deny(reason) => {
+            warn!("Anti-sybil rejected {}: {}", req.agent_github_id, reason);
+            return (
+                StatusCode::FORBIDDEN,
+                Json(VerifyResponse {
+                    signature: String::new(),
+                    error: Some("Rejected by anti-sybil policy".into()),
+                }),
+            );
+        }
+        oracle::SybilVerdict::Allow => {}
     }
 
     let c_addr = match hex_to_20(&req.contract_addr) {
@@ -693,7 +788,7 @@ pub async fn verify_graph_execution(
         );
     }
 
-    let rate_key = extract_rate_key(&headers, None);
+    let rate_key = extract_rate_key(&headers, None, None);
     if !state.rate_limiter.check(&rate_key) {
         return (
             StatusCode::TOO_MANY_REQUESTS,
