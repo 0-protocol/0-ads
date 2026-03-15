@@ -16,7 +16,7 @@
 │  STATUS: LIVE ON BASE SEPOLIA TESTNET                   │
 │  CONTRACT: 0x8a2aD6bC4A240515c49035bE280BacB7CA94afC4  │
 │  CHAIN: Base L2 (Chain ID 84532)                        │
-│  AUDITED BY: 5 independent security firms               │
+│  AUDITED BY: LLMs cosplaying as 5 audit firms (yes rly) │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -100,17 +100,20 @@ By separating the Oracle intent verification from the on-chain payout logic, 0-a
 
 ### Stage 1 — Campaign Creation (Advertiser)
 
-The advertiser calls `AdEscrow.createCampaign()` on Base L2:
+The advertiser calls `AdEscrow.createCampaign()` on Base L2. Campaign IDs are derived deterministically from the sender's address and nonce — no namespace squatting possible:
 
 ```solidity
-createCampaign(
-    campaignId,              // unique identifier
+// Preview the ID before committing (view, no gas)
+bytes32 id = escrow.previewCampaignId(msg.sender);
+
+// Create — ID is derived on-chain, returned in the event
+bytes32 campaignId = escrow.createCampaign(
     USDC,                    // ERC-20 token address
     10000e6,                 // 10,000 USDC budget
     5e6,                     // 5 USDC per agent payout
     verificationGraphHash,   // 0-lang graph that defines the task
     oracleAddress            // trusted verifier
-)
+);
 ```
 
 The USDC is **locked in escrow**. The advertiser cannot withdraw it for 7 days (anti-rug cooldown). The contract uses balance-diff accounting to safely handle fee-on-transfer tokens.
@@ -227,7 +230,7 @@ The signature binds `chainId + contractAddress + campaignId + agent + payout + d
 │   │       ├── MockFeeToken.sol  #   Fee-on-transfer test token
 │   │       └── DevnetUSDC.sol    #   Devnet USDC mock
 │   ├── test/
-│   │   └── AdEscrow.test.js      #   33 security-focused test cases
+│   │   └── AdEscrow.test.js      #   55+ security-focused test cases
 │   └── hardhat.config.js
 │
 ├── python/                       # Agent SDK
@@ -266,24 +269,27 @@ The signature binds `chainId + contractAddress + campaignId + agent + payout + d
 
 ## Security Audit Status
 
-The protocol has been reviewed by **5 independent security teams** across 6 audit rounds:
+> **Disclaimer**: We did NOT hire 5 real security firms. We're an indie project. What we *did* do is run multiple frontier LLMs (Claude Opus 4.6, GPT-5.3-Codex) through adversarial multi-round code reviews, where each model was prompted to adopt the methodology and rigor of top-tier audit firms. Think of it as **LLM cosplay auditing** — the models roleplayed as OpenZeppelin, SlowMist, etc. to stress-test the code from different angles. It's not a substitute for a real audit, but it caught 40+ real bugs and we fixed them all. We're being transparent about this because honesty > clout.
 
 ```
 ┌────────────────────────────────────────────────────────────────┐
 │                    AUDIT SCORECARD                              │
+│           (LLM-assisted — not real audit firms!)               │
 │                                                                │
-│  Auditor           │ Focus Area          │ Status              │
-│  ──────────────────│─────────────────────│──────────────────── │
-│  OpenZeppelin      │ EVM architecture    │ ALL FINDINGS FIXED  │
-│  SlowMist          │ P2P + oracle        │ ALL FINDINGS FIXED  │
-│  CertiK            │ Cryptography        │ N/A (Solana sunset) │
-│  Halborn           │ Solana ecosystem    │ N/A (Solana sunset) │
-│  GoPlus            │ API risk control    │ ALL FINDINGS FIXED  │
-│  Claude Opus 4.6   │ Full-stack V3       │ 28/31 resolved      │
-│  GPT-5.3-Codex     │ Independent recheck │ ALL FINDINGS FIXED  │
+│  LLM / Persona      │ Focus Area          │ Status             │
+│  ────────────────────│─────────────────────│─────────────────── │
+│  Claude Opus 4.6     │ Full-stack V3       │ 28/31 resolved     │
+│    as "OpenZeppelin" │ EVM architecture    │ ALL FINDINGS FIXED │
+│    as "SlowMist"     │ P2P + oracle        │ ALL FINDINGS FIXED │
+│  GPT-5.3-Codex       │ Independent recheck │ ALL FINDINGS FIXED │
+│    as "GoPlus"       │ API risk control    │ ALL FINDINGS FIXED │
+│  Blackhat Red Team   │ Adversarial V3 close│ 30/31 resolved     │
 │                                                                │
 │  Total: 40+ findings identified. All actionable items fixed.   │
-│  3 acknowledged protocol-level limitations documented.         │
+│  1 architectural limitation (single oracle key) deferred to    │
+│  PHASE3 Decentralized Oracle Network.                          │
+│                                                                │
+│  ⚠ This is NOT a professional audit. DYOR before mainnet.      │
 └────────────────────────────────────────────────────────────────┘
 ```
 
