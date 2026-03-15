@@ -86,13 +86,44 @@ Added `CacheEntry` with `created_at: Instant` timestamp and a 1-hour TTL constan
 
 ---
 
+## V2 Joint Audit Response (Update_Audit_Review_V2.md)
+
+Following the V4 fixes, a 5-firm joint committee re-audited the code. Below are responses to remaining findings.
+
+### CertiK [Critical] — Oracle secp256k1/Ed25519 Incompatibility
+
+**Status: N/A — Solana sunset in commit `a504942`**
+
+The Solana integration was removed from the protocol before this audit round. All settlement now occurs on Base L2 (EVM). The oracle correctly uses secp256k1/ECDSA for all EVM interactions. No Ed25519 signing is needed.
+
+### SlowMist [High] — P2P Fake Intent Spam (Griefing Attack)
+
+**Status: RESOLVED**
+
+Added `CampaignVerifier` to `main.rs` — an async on-chain verification layer that makes `eth_call` to the AdEscrow contract before promoting any `unverified_intent` to `active_intents`. The verifier:
+
+1. Constructs calldata for `campaigns(bytes32)` against the deployed contract
+2. Parses the ABI response to check `advertiser != address(0)` (campaign exists)
+3. Checks `budget >= payout` (campaign is funded)
+4. Drops intents that fail verification with a warning log
+
+Configuration via `BASE_RPC_URL` and `ESCROW_CONTRACT_ADDR` env vars (defaults to Base Sepolia).
+
+### OpenZeppelin [Medium] — Campaign ID Front-running
+
+**Status: ACKNOWLEDGED**
+
+This is a business design choice. Auto-generated IDs would break the current SDK flow where advertisers coordinate campaign IDs with off-chain systems. The existing `require(advertiser == address(0))` check ensures the griefing only causes a revert (no fund loss). Advertisers can retry with a different ID. Documented as a known limitation.
+
+---
+
 ## Remaining Acknowledged Risks
 
 | ID | Severity | Description | Mitigation |
 |----|----------|-------------|------------|
 | H-06 | High | Single oracle ECDSA key | Deferred to multi-oracle milestone; key zeroized on drop |
 | M-03 | Medium | GitHub star TOCTOU | Protocol limitation; zkTLS on roadmap |
-| N-03 | Info | No on-chain campaign verification for gossipsub intents | Acceptable for testnet; claim fails at contract level |
+| M-CID | Medium | Campaign ID front-running | Business design choice; no fund loss; retry-safe |
 
 ---
 

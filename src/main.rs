@@ -7,6 +7,7 @@ use axum::{
 };
 use libp2p::{gossipsub, swarm::SwarmEvent};
 use serde::{Deserialize, Serialize};
+use sha3::{Digest, Keccak256};
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -23,6 +24,7 @@ const MAX_ACTIVE_INTENTS: usize = 10_000;
 const MAX_UNVERIFIED_INTENTS: usize = 5_000;
 const MAX_SIGNATURE_DEADLINE_SECS: u64 = 3600; // 1 hour max TTL
 const GOSSIPSUB_TOPIC: &str = "0-ads-intents-v1";
+const DEFAULT_ESCROW_CONTRACT: &str = "0x8a2aD6bC4A240515c49035bE280BacB7CA94afC4";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AdIntent {
@@ -69,6 +71,7 @@ struct AppState {
     graph_semaphore: Arc<Semaphore>,
     rate_limiter: Arc<SlidingWindowRateLimiter>,
     gossipsub_tx: mpsc::UnboundedSender<Vec<u8>>,
+    campaign_verifier: Option<Arc<CampaignVerifier>>,
 }
 
 fn load_oracle_key() -> Result<[u8; 32], Box<dyn std::error::Error>> {
@@ -229,6 +232,92 @@ impl SlidingWindowRateLimiter {
     }
 }
 
+/// Verifies campaign existence and funding on-chain via EVM JSON-RPC eth_call.
+struct CampaignVerifier {
+    rpc_url: String,
+    contract_addr: String,
+    client: reqwest::Client,
+    selector: [u8; 4],
+}
+
+impl CampaignVerifier {
+    fn new(rpc_url: String, contract_addr: String) -> Self {
+        let mut hasher = Keccak256::new();
+        hasher.update(b"campaigns(bytes32)");
+        let hash = hasher.finalize();
+        let mut selector = [0u8; 4];
+        selector.copy_from_slice(&hash[..4]);
+
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .expect("Failed to build RPC client");
+
+        Self { rpc_url, contract_addr, client, selector }
+    }
+
+    /// Returns true if the campaign exists on-chain and has budget >= payout.
+    async fn is_campaign_funded(&self, campaign_id_hex: &str) -> bool {
+        let campaign_bytes = match hex::decode(campaign_id_hex.trim_start_matches("0x")) {
+            Ok(b) if b.len() == 32 => b,
+            _ => return false,
+        };
+
+        let mut calldata = Vec::with_capacity(36);
+        calldata.extend_from_slice(&self.selector);
+        calldata.extend_from_slice(&campaign_bytes);
+
+        let payload = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "eth_call",
+            "params": [{
+                "to": &self.contract_addr,
+                "data": format!("0x{}", hex::encode(&calldata))
+            }, "latest"],
+            "id": 1
+        });
+
+        let resp = match self.client.post(&self.rpc_url).json(&payload).send().await {
+            Ok(r) => r,
+            Err(e) => {
+                warn!("On-chain verification RPC error: {}", e);
+                return false;
+            }
+        };
+
+        let body: serde_json::Value = match resp.json().await {
+            Ok(b) => b,
+            Err(_) => return false,
+        };
+
+        let result_hex = match body["result"].as_str() {
+            Some(r) => r.trim_start_matches("0x"),
+            None => return false,
+        };
+
+        let result_bytes = match hex::decode(result_hex) {
+            Ok(b) => b,
+            Err(_) => return false,
+        };
+
+        // ABI layout: advertiser(32) + token(32) + budget(32) + payout(32) + ...
+        if result_bytes.len() < 128 {
+            return false;
+        }
+
+        // advertiser: bytes 0..32 — zero means campaign doesn't exist
+        let advertiser_slice = &result_bytes[0..32];
+        if advertiser_slice.iter().all(|&b| b == 0) {
+            return false;
+        }
+
+        // budget: bytes 64..96, payout: bytes 96..128 (big-endian uint256)
+        let budget = &result_bytes[64..96];
+        let payout = &result_bytes[96..128];
+        budget >= payout
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt::init();
@@ -269,6 +358,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let (gossipsub_tx, mut gossipsub_rx) = mpsc::unbounded_channel::<Vec<u8>>();
 
+    let campaign_verifier = {
+        let rpc_url = std::env::var("BASE_RPC_URL")
+            .unwrap_or_else(|_| "https://sepolia.base.org".to_string());
+        let contract = std::env::var("ESCROW_CONTRACT_ADDR")
+            .unwrap_or_else(|_| DEFAULT_ESCROW_CONTRACT.to_string());
+        info!("On-chain campaign verification enabled: contract={} rpc={}", contract, rpc_url);
+        Some(Arc::new(CampaignVerifier::new(rpc_url, contract)))
+    };
+
     let state = Arc::new(AppState {
         active_intents: DashMap::new(),
         unverified_intents: DashMap::new(),
@@ -279,6 +377,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         graph_semaphore: Arc::new(Semaphore::new(4)),
         rate_limiter: Arc::new(SlidingWindowRateLimiter::new(rate_limit_rpm, 60)),
         gossipsub_tx,
+        campaign_verifier,
     });
 
     let mut swarm = network::build_0_ads_swarm()?;
@@ -330,13 +429,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     break;
                 }
                 if let Some((_, intent)) = verify_state.unverified_intents.remove(&key) {
-                    if validate_intent(&intent) {
-                        if !verify_state.active_intents.contains_key(&intent.campaign_id) {
-                            verify_state
-                                .active_intents
-                                .insert(intent.campaign_id.clone(), intent);
+                    if !validate_intent(&intent) {
+                        continue;
+                    }
+                    if verify_state.active_intents.contains_key(&intent.campaign_id) {
+                        continue;
+                    }
+
+                    if let Some(verifier) = &verify_state.campaign_verifier {
+                        if !verifier.is_campaign_funded(&intent.campaign_id).await {
+                            warn!(
+                                "Dropped intent {}: campaign not found or underfunded on-chain",
+                                intent.campaign_id
+                            );
+                            continue;
                         }
                     }
+
+                    verify_state
+                        .active_intents
+                        .insert(intent.campaign_id.clone(), intent);
                 }
             }
 
