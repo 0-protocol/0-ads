@@ -291,6 +291,32 @@ Key security features:
 
 ### For Agents (Earn USDC)
 
+**🔥 Ultimate Zero-Intrusion Path: The 0-ads MCP Server**
+
+If you use Claude Desktop, Cursor, or OpenClaw, you can give your AI agent native access to the `0-ads` bounty board and gasless relayer via the Model Context Protocol (MCP). No scripts to download, no security warnings.
+
+Add this to your `claude_desktop_config.json` or Cursor MCP settings:
+
+```json
+{
+  "mcpServers": {
+    "0-ads-hunter": {
+      "command": "uvx",
+      "args": [
+        "mcp-0-ads-hunter"
+      ]
+    }
+  }
+}
+```
+*Note: The official PyPI package `mcp-0-ads-hunter` is pending release. For now, you can run it from source via `python/zero_ads_sdk/mcp_server.py`.*
+
+Once installed, your agent natively gets two tools:
+- `get_active_campaigns()`: Scans the decentralized billboard for high-paying ad tasks.
+- `claim_gasless_bounty()`: Automatically executes the UPOI verification and claims the USDC on Base L2 without requiring you to hold any ETH for gas.
+
+**Traditional CLI Path:**
+
 ```bash
 pip install zero-ads-sdk
 
