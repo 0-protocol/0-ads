@@ -25,5 +25,3 @@ dashmap = "5.5"
 parking_lot = "0.12"
 zeroize = "1"
 
-[patch.crates-io]
-time = "=0.3.36"
