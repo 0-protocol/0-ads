@@ -174,23 +174,26 @@ impl AttentionOracle {
         })?;
 
         if resp.status().is_success() {
-            let signature = self
-                .sign_payout(chain_id, contract_addr, campaign_id, agent_eth_addr, payout, deadline)
-                .map_err(|e| VMError::ExternalResolutionFailed {
-                    uri: url.clone(),
-                    reason: e,
-                })?;
-            self.signature_cache.insert(cache_key, CacheEntry {
-                signature: signature.clone(),
-                created_at: Instant::now(),
-            });
-            Ok(signature)
-        } else {
-            Err(VMError::ExternalResolutionFailed {
-                uri: url.clone(),
-                reason: "Agent did not star target repo".into(),
-            })
+            let body = resp.text().await.unwrap_or_default();
+            if body.contains(target_repo) {
+                let signature = self
+                    .sign_payout(chain_id, contract_addr, campaign_id, agent_eth_addr, payout, deadline)
+                    .map_err(|e| VMError::ExternalResolutionFailed {
+                        uri: url.clone(),
+                        reason: e,
+                    })?;
+                self.signature_cache.insert(cache_key, CacheEntry {
+                    signature: signature.clone(),
+                    created_at: Instant::now(),
+                });
+                return Ok(signature);
+            }
         }
+        
+        Err(VMError::ExternalResolutionFailed {
+            uri: url.clone(),
+            reason: "Agent did not star target repo".into(),
+        })
     }
 
     /// Payload: abi.encode(chainid, address(this), campaignId, msg.sender, payout, deadline)
