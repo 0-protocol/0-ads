@@ -101,7 +101,7 @@ def claim_bounty(campaign_id_hex, agent_private_key, github_id, repo, payout_amo
 
         # Sign & Send
         signed_tx = w3.eth.account.sign_transaction(tx, private_key=agent_private_key)
-        tx_hash = w3.eth.send_raw_transaction(signed_tx.rawTransaction)
+        tx_hash = w3.eth.send_raw_transaction(signed_tx.raw_transaction)
         
         print(f"🎉 Success! Payout transaction broadcasted!")
         print(f"🔗 View on Basescan: https://sepolia.basescan.org/tx/0x{tx_hash.hex()}")
