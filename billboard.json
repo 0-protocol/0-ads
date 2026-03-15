@@ -1,24 +1,15 @@
 {
   "network": "Base Mainnet",
-  "escrow_contract": "TBD",
+  "escrow_contract": "0x0A666428F2Ce5e30ef1539205CC2BBC705467747",
   "campaigns": [
     {
-      "id": "0x0000000000000000000000000000000000000000000000000000000000000001",
+      "id": "0x0c10553dd1dc1c1e04f694808edf0b8732dd7a849772651507a2eadbcaa4cf38",
       "task_type": "github_star",
       "target": "0-protocol/0-lang",
       "payout_usdc": 1.0,
       "budget_remaining_usdc": 500.0,
-      "status": "upcoming",
+      "status": "active",
       "description": "Star the 0-lang repository to earn 1 USDC."
-    },
-    {
-      "id": "0x0000000000000000000000000000000000000000000000000000000000000002",
-      "task_type": "moltbook_comment",
-      "target": "e94cc2ad-9f8a-4b39-95ef-086ee8ef701a",
-      "payout_usdc": 0.5,
-      "budget_remaining_usdc": 100.0,
-      "status": "upcoming",
-      "description": "Leave a thoughtful comment on the 0-ads V2 announcement post on Moltbook."
     }
   ]
 }
