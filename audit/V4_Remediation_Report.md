@@ -117,6 +117,19 @@ This is a business design choice. Auto-generated IDs would break the current SDK
 
 ---
 
+## V3 Joint Audit Remediation (Update_Audit_Review_V3.md)
+
+| ID | Severity | Finding | Source | Status | Fix |
+|----|----------|---------|--------|--------|-----|
+| GAS-01 | Critical | Gasless relayer incompatible with claimPayout (msg.sender) | CertiK V3 | **RESOLVED** | `claimPayoutFor(agent)` delegated entrypoint; `claimPayout` wraps with `msg.sender` |
+| MOC-01 | High | Mock signatures in universal_oracle.py | SlowMist V3 | **RESOLVED** | Removed mock; endpoint returns verification status only, no signing |
+| FOV-01 | High | Fail-open verifier branches (Twitter/XHS default True) | SlowMist V3 | **RESOLVED** | All branches now fail-closed when credentials are missing |
+| SYB-01 | High | Weak anti-sybil not enforced in signing path | SlowMist V3 | **RESOLVED** | Pluggable `SybilPolicy` in Rust oracle; fail-closed; configurable thresholds |
+| PAU-01 | Medium | Centralized pause via single-owner EOA | OpenZeppelin V3 | **RESOLVED** | Deploy script supports `SAFE_ADDRESS` for immediate ownership transfer |
+| KEY-01 | Medium | Hardcoded default oracle key in Rust node | New finding | **RESOLVED** | Removed; startup fails without explicit key |
+
+---
+
 ## Remaining Acknowledged Risks
 
 | ID | Severity | Description | Mitigation |
@@ -130,9 +143,12 @@ This is a business design choice. Auto-generated IDs would break the current SDK
 ## Test Evidence
 
 ```
-AdEscrow: 26 passing (864ms)
+AdEscrow: 33 passing
   - 7 createCampaign tests (incl. fee-on-transfer, zero-oracle)
   - 7 claimPayout tests (incl. existence check, exhaustion)
   - 5 cancelCampaign tests
   - 7 updateOracle tests (incl. grace period acceptance/rejection)
+  - 7 claimPayoutFor tests (delegated claim, fund-redirect prevention, cross-path replay)
+
+CI Audit Guard: scripts/audit_guard.sh — all checks pass
 ```

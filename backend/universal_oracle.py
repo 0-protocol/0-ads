@@ -1,3 +1,13 @@
+"""
+Universal Oracle — Multi-platform intent verification module (PROTOTYPE).
+
+This module handles verification of agent actions across platforms (GitHub,
+Moltbook, Twitter, Xiaohongshu). It does NOT produce on-chain signatures;
+cryptographic signing is handled exclusively by the production Rust oracle
+(src/oracle.rs).  All verifiers are fail-closed: missing credentials cause
+rejection, never silent approval.
+"""
+
 import os
 import requests
 import json
@@ -5,7 +15,7 @@ import datetime
 from fastapi import FastAPI, HTTPException
 from typing import Dict, Any, Callable
 
-app = FastAPI()
+app = FastAPI(title="0-ads Universal Oracle (Prototype — verification only, no signing)")
 
 # Registry of active Verification Graphs
 # A Verification Graph takes a payload and returns a boolean True/False
@@ -93,8 +103,8 @@ def verify_twitter_retweet(payload: dict) -> bool:
     
     bearer_token = os.environ.get("TWITTER_BEARER_TOKEN")
     if not bearer_token:
-        print("[Verifier: Twitter] ⚠️ Missing API Token. Defaulting to True in Devnet.")
-        return True
+        print("[Verifier: Twitter] REJECTED — TWITTER_BEARER_TOKEN not configured.")
+        return False
         
     try:
         # First resolve user_id from username
@@ -130,18 +140,18 @@ def verify_xiaohongshu_like(payload: dict) -> bool:
     # Needs valid cookie / local xhshow installation
     cookie = os.environ.get("XHS_COOKIE")
     if not cookie:
-        print("[Verifier: Xiaohongshu] ⚠️ Missing Cookie. Defaulting to True in Devnet.")
-        return True
+        print("[Verifier: Xiaohongshu] REJECTED — XHS_COOKIE not configured.")
+        return False
         
     try:
         from xhshow import XhsClient
         client = XhsClient(cookie=cookie)
         res = client.get_note_by_id(target_note)
-        # Note: True public verification of likes is restricted by XHS anti-crawler
-        # For agent-based verification, an auth proof or local SDK call is needed.
-        if res:
-            print(f"[Verifier: Xiaohongshu] ⚠️ Assuming intent verified for Devnet.")
-            return True
+        if not res:
+            print(f"[Verifier: Xiaohongshu] ❌ Note {target_note} not found or inaccessible.")
+            return False
+        print(f"[Verifier: Xiaohongshu] ✅ Note exists. Like verification requires auth proof.")
+        return False  # Cannot confirm likes without auth proof — fail closed
     except Exception as e:
         print(f"[Verifier: Xiaohongshu] ⚠️ API Error: {e}")
         
@@ -181,16 +191,13 @@ async def verify_universal_claim(payload: dict):
             }
         )
         
-    # 2. Sybil Defense Layer (Example call to anti_sybil checker)
-    # check_anti_sybil(payload.get("agent_id"), task_type)
-    
-    # 3. Generate On-Chain Signature (Simulation)
-    signature = "0xUniversalSignedProofOfIntent..."
-    
+    # This module verifies intent only. Cryptographic signing is handled by the
+    # production Rust oracle (src/oracle.rs). This endpoint confirms verification
+    # status but does NOT produce on-chain signatures.
     return {
-        "status": "ok", 
+        "status": "verified",
         "task_type": task_type,
-        "signature": signature
+        "note": "Intent verified. Submit to the production oracle (/api/v1/oracle/verify) for ECDSA signature."
     }
 
 if __name__ == "__main__":

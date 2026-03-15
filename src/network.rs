@@ -1,11 +1,38 @@
 use libp2p::{
     gossipsub::{self, MessageAuthenticity, ValidationMode},
-    identity, Multiaddr, PeerId, Swarm,
+    identity, mdns,
+    swarm::NetworkBehaviour,
+    Multiaddr, PeerId, Swarm,
 };
 use std::path::PathBuf;
 use tracing::{info, warn};
 
 const NODE_KEY_FILE: &str = "node_identity.key";
+
+#[derive(NetworkBehaviour)]
+#[behaviour(to_swarm = "BehaviourEvent")]
+pub struct Behaviour {
+    pub gossipsub: gossipsub::Behaviour,
+    pub mdns: mdns::tokio::Behaviour,
+}
+
+#[derive(Debug)]
+pub enum BehaviourEvent {
+    Gossipsub(gossipsub::Event),
+    Mdns(mdns::Event),
+}
+
+impl From<gossipsub::Event> for BehaviourEvent {
+    fn from(value: gossipsub::Event) -> Self {
+        Self::Gossipsub(value)
+    }
+}
+
+impl From<mdns::Event> for BehaviourEvent {
+    fn from(value: mdns::Event) -> Self {
+        Self::Mdns(value)
+    }
+}
 
 /// Load or create a persistent Ed25519 identity so the node keeps its PeerId across restarts.
 fn load_or_generate_identity() -> identity::Keypair {
@@ -18,7 +45,10 @@ fn load_or_generate_identity() -> identity::Keypair {
         match std::fs::read(&key_path) {
             Ok(bytes) => {
                 if let Ok(keypair) = identity::Keypair::from_protobuf_encoding(&bytes) {
-                    info!("Loaded persistent node identity from {}", key_path.display());
+                    info!(
+                        "Loaded persistent node identity from {}",
+                        key_path.display()
+                    );
                     return keypair;
                 }
                 warn!("Corrupt node identity file, generating new one");
@@ -33,7 +63,10 @@ fn load_or_generate_identity() -> identity::Keypair {
         if let Err(e) = std::fs::write(&key_path, &encoded) {
             warn!("Could not persist node identity: {}", e);
         } else {
-            info!("Generated and saved new node identity to {}", key_path.display());
+            info!(
+                "Generated and saved new node identity to {}",
+                key_path.display()
+            );
         }
     }
     keypair
@@ -46,15 +79,18 @@ fn bootstrap_peers() -> Vec<Multiaddr> {
         .split(',')
         .filter(|s| !s.trim().is_empty())
         .filter_map(|s| {
-            s.trim().parse::<Multiaddr>().map_err(|e| {
-                warn!("Invalid bootstrap peer address '{}': {}", s.trim(), e);
-                e
-            }).ok()
+            s.trim()
+                .parse::<Multiaddr>()
+                .map_err(|e| {
+                    warn!("Invalid bootstrap peer address '{}': {}", s.trim(), e);
+                    e
+                })
+                .ok()
         })
         .collect()
 }
 
-pub fn build_0_ads_swarm() -> Result<Swarm<gossipsub::Behaviour>, Box<dyn std::error::Error>> {
+pub fn build_0_ads_swarm() -> Result<Swarm<Behaviour>, Box<dyn std::error::Error>> {
     let local_key = load_or_generate_identity();
     let local_key_clone = local_key.clone();
     let local_peer_id = PeerId::from(local_key.public());
@@ -69,10 +105,13 @@ pub fn build_0_ads_swarm() -> Result<Swarm<gossipsub::Behaviour>, Box<dyn std::e
     let mut gossipsub = gossipsub::Behaviour::new(
         MessageAuthenticity::Signed(local_key_clone),
         gossipsub_config,
-    ).expect("Correct configuration");
+    )
+    .expect("Correct configuration");
 
     let ad_topic = gossipsub::IdentTopic::new("0-ads-intents-v1");
     gossipsub.subscribe(&ad_topic)?;
+
+    let mdns_behaviour = mdns::tokio::Behaviour::new(mdns::Config::default(), local_peer_id)?;
 
     let mut swarm = libp2p::SwarmBuilder::with_existing_identity(local_key)
         .with_tokio()
@@ -81,7 +120,10 @@ pub fn build_0_ads_swarm() -> Result<Swarm<gossipsub::Behaviour>, Box<dyn std::e
             libp2p::noise::Config::new,
             libp2p::yamux::Config::default,
         )?
-        .with_behaviour(|_| gossipsub)?
+        .with_behaviour(|_| Behaviour {
+            gossipsub,
+            mdns: mdns_behaviour,
+        })?
         .build();
 
     let peers = bootstrap_peers();

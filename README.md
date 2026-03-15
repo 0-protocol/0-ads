@@ -178,27 +178,32 @@ The Attention Oracle in `src/oracle.rs`:
 
 ### Stage 5 — On-Chain Settlement
 
-The agent submits the oracle signature to `AdEscrow.claimPayout()` on Base L2:
+The agent (or a gasless relayer on the agent's behalf) submits the oracle signature to the AdEscrow contract on Base L2:
 
 ```
-┌─────────────────────────────────────────────────────────┐
-│                    AdEscrow.sol                          │
-│                                                          │
-│  claimPayout(campaignId, deadline, oracleSignature)      │
-│                                                          │
-│  1. require(campaign exists)                             │
-│  2. require(deadline not expired)                        │
-│  3. require(budget >= payout)                            │
-│  4. require(agent hasn't claimed)                        │
-│  5. Reconstruct payload hash                             │
-│  6. ECDSA.recover(sig) == oracle address                 │
-│     OR previousOracle within 1hr grace period            │
-│  7. Transfer USDC to agent                               │
-│  8. Emit PayoutClaimed event                             │
-└─────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────┐
+│                      AdEscrow.sol                                 │
+│                                                                   │
+│  claimPayout(campaignId, deadline, oracleSignature)               │
+│    → agent = msg.sender (direct claim)                            │
+│                                                                   │
+│  claimPayoutFor(campaignId, agent, deadline, oracleSignature)     │
+│    → delegated claim: relayer submits, agent receives funds       │
+│                                                                   │
+│  Internal flow (_claimPayoutFor):                                 │
+│  1. require(campaign exists)                                      │
+│  2. require(deadline not expired)                                 │
+│  3. require(budget >= payout)                                     │
+│  4. require(agent hasn't claimed)                                 │
+│  5. Reconstruct payload hash bound to agent address               │
+│  6. ECDSA.recover(sig) == oracle address                          │
+│     OR previousOracle within 1hr grace period                     │
+│  7. Transfer USDC to agent (NOT msg.sender)                       │
+│  8. Emit PayoutClaimed event                                      │
+└──────────────────────────────────────────────────────────────────┘
 ```
 
-The signature binds `chainId + contractAddress + campaignId + agent + payout + deadline`, preventing cross-chain replay, cross-contract replay, and double-claiming.
+The signature binds `chainId + contractAddress + campaignId + agent + payout + deadline`, preventing cross-chain replay, cross-contract replay, double-claiming, and relayer fund-redirect attacks.
 
 ---
 
@@ -222,7 +227,7 @@ The signature binds `chainId + contractAddress + campaignId + agent + payout + d
 │   │       ├── MockFeeToken.sol  #   Fee-on-transfer test token
 │   │       └── DevnetUSDC.sol    #   Devnet USDC mock
 │   ├── test/
-│   │   └── AdEscrow.test.js      #   26 security-focused test cases
+│   │   └── AdEscrow.test.js      #   33 security-focused test cases
 │   └── hardhat.config.js
 │
 ├── python/                       # Agent SDK
@@ -231,6 +236,11 @@ The signature binds `chainId + contractAddress + campaignId + agent + payout + d
 │       ├── cli.py                #   CLI interface
 │       └── examples/
 │           └── claim_bounty.py   #   End-to-end claim example
+│
+├── backend/                      # Prototype helpers (NOT production oracle)
+│   ├── universal_oracle.py       #   Multi-platform verification (no signing)
+│   ├── oracle_anti_sybil.py      #   Basic reputation heuristics (prototype)
+│   └── gasless_relayer.py        #   Gasless relayer node (uses claimPayoutFor)
 │
 ├── agents/skills/                # Agent Skills
 │   └── 0-ads-hunter.skill       #   Bounty hunter skill for 0-agents
@@ -387,6 +397,39 @@ cargo run
 | `ENABLE_GRAPH_EXECUTION` | `false` | Enable 0-lang VM execution endpoint |
 | `GH_TOKEN` | — | GitHub token for 5000 req/hr API limit |
 | `PORT` | `8080` | HTTP API listen port |
+| `SYBIL_POLICY` | `on` | Anti-sybil enforcement (`on`/`off`) |
+| `SYBIL_MIN_AGE_DAYS` | `90` | Minimum GitHub account age in days |
+| `SYBIL_MIN_FOLLOWERS` | `3` | Minimum GitHub followers required |
+| `SYBIL_MIN_REPOS` | `1` | Minimum public repos required |
+
+---
+
+## Security Operations
+
+### Ownership & Pause Governance
+
+The `AdEscrow` contract inherits OpenZeppelin `Ownable` + `Pausable`. The owner can `pause()` and `unpause()` the contract in emergencies.
+
+**Before mainnet launch**, transfer ownership to a multi-sig (e.g., Gnosis Safe):
+
+```bash
+SAFE_ADDRESS=0xYourSafeAddress npx hardhat run scripts/deploy.js --network base
+```
+
+If the contract is already deployed, call `transferOwnership(safeAddress)` from the current owner.
+
+### Oracle Key Management
+
+The billboard node **refuses to start** without an explicit oracle key. There is no hardcoded default.
+Provide the key via `ORACLE_PRIVATE_KEY` or `ORACLE_KEY_FILE` (path to a file containing the hex key).
+The key is zeroized in memory when the process exits.
+
+### Anti-Sybil Policy
+
+The oracle enforces a configurable anti-sybil gate before issuing payout signatures.
+The policy is fail-closed: GitHub API errors or missing data cause rejection.
+Tune thresholds with `SYBIL_MIN_AGE_DAYS`, `SYBIL_MIN_FOLLOWERS`, and `SYBIL_MIN_REPOS`.
+Set `SYBIL_POLICY=off` only for local development.
 
 ---
 

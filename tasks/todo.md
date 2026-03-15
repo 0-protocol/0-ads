@@ -105,3 +105,21 @@
 - [x] **NEW-6: sweepDust missing whenNotPaused** — Added `whenNotPaused` modifier to `sweepDust`.
 - [x] **NEW-7: deriveCampaignId UX** — Replaced state-changing `deriveCampaignId()` with `view` function `previewCampaignId(address sender)`. Nonce consumed only inside `createCampaign`.
 - [x] **NEW-8: No test coverage for V5 changes** — Added 47+ tests covering `sweepDust`, `previewCampaignId`, `MAX_DEADLINE_WINDOW`, pause guards for all functions, and adapted all existing tests to new `createCampaign` signature.
+
+---
+
+## V3 Final Audit Close (BLACKHAT_AUDIT_REPORT.md)
+
+- [x] Final close status recorded: overall risk **LOW**, 29/31 findings fully resolved.
+- [x] Residual observations addressed in final perfection pass:
+  - Stale `unverified_order` keys compacted periodically in `src/main.rs`.
+  - mDNS peer discovery added to P2P behavior and swarm event handling.
+  - Deploy script aligned with current `createCampaign(token, budget, payout, graphHash, oracle)` signature and event-based campaign ID extraction.
+
+## Phase 3 Roadmap (Next Milestones)
+
+- [ ] **DON (Decentralized Oracle Network)** — threshold signatures (t-of-n) and key-rotation governance.
+- [ ] **ZK-TLS Verification Path** — trust-minimized off-chain proof ingestion for social actions.
+- [ ] **UUPS Upgradeability Track** — migration plan, storage layout checks, and governance guardrails.
+- [ ] **Dispute / Fraud-Proof Mechanism** — challenge windows, slashing policy, and evidence format.
+- [ ] **Subgraph + Monitoring** — realtime indexer, anomaly alerts, and operator dashboards.

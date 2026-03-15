@@ -1,9 +1,20 @@
+"""
+Anti-Sybil module — GitHub reputation heuristics (PROTOTYPE).
+
+This is a baseline reputation gate. It is NOT a production-grade Sybil defense.
+Production integration should use pluggable providers (Gitcoin Passport,
+Worldcoin, behavioral analytics) via the Rust oracle's anti-sybil policy layer
+(see src/oracle.rs).
+
+All checks are fail-closed: API errors or missing data cause rejection.
+"""
+
 import requests
 import json
 import datetime
 from fastapi import FastAPI, HTTPException
 
-app = FastAPI()
+app = FastAPI(title="0-ads Anti-Sybil (Prototype — basic heuristics only)")
 
 # Minimum Account Age (e.g. 1 year)
 MIN_ACCOUNT_AGE_DAYS = 365
@@ -53,8 +64,10 @@ async def verify_claim(payload: dict):
             detail="Account flagged by Anti-Sybil system. Account too new or insufficient reputation."
         )
         
-    # (Rest of Oracle signing logic goes here...)
-    return {"status": "ok", "signature": "0x..."}
+    return {
+        "status": "sybil_check_passed",
+        "note": "Reputation check passed. Submit to the production Rust oracle for ECDSA signing."
+    }
 
 if __name__ == "__main__":
     import uvicorn

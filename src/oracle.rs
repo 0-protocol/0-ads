@@ -1,12 +1,12 @@
-use zerolang::VMError;
+use dashmap::DashMap;
+use k256::ecdsa::{signature::Signer, SigningKey, VerifyingKey};
+use k256::ecdsa::{RecoveryId, Signature};
 use reqwest::Client;
-use k256::ecdsa::{SigningKey, signature::Signer, VerifyingKey};
-use k256::ecdsa::{Signature, RecoveryId};
 use sha3::{Digest, Keccak256};
 use std::time::{Duration, Instant};
-use dashmap::DashMap;
 use tracing::{info, warn};
 use zeroize::Zeroize;
+use zerolang::VMError;
 
 const CACHE_TTL_SECS: u64 = 3600;
 
@@ -45,12 +45,23 @@ impl SybilPolicy {
             .map(|v| v != "off" && v != "0" && v != "false")
             .unwrap_or(true);
         let min_age = std::env::var("SYBIL_MIN_AGE_DAYS")
-            .ok().and_then(|v| v.parse().ok()).unwrap_or(90);
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(90);
         let min_followers = std::env::var("SYBIL_MIN_FOLLOWERS")
-            .ok().and_then(|v| v.parse().ok()).unwrap_or(3);
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(3);
         let min_repos = std::env::var("SYBIL_MIN_REPOS")
-            .ok().and_then(|v| v.parse().ok()).unwrap_or(1);
-        Self { enabled, min_account_age_days: min_age, min_followers, min_public_repos: min_repos }
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1);
+        Self {
+            enabled,
+            min_account_age_days: min_age,
+            min_followers,
+            min_public_repos: min_repos,
+        }
     }
 
     pub async fn check(&self, client: &Client, github_id: &str) -> SybilVerdict {
@@ -74,7 +85,8 @@ impl SybilPolicy {
 
         if !resp.status().is_success() {
             return SybilVerdict::Deny(format!(
-                "GitHub user lookup failed (status {})", resp.status()
+                "GitHub user lookup failed (status {})",
+                resp.status()
             ));
         }
 
@@ -91,7 +103,9 @@ impl SybilPolicy {
             .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
             .map(|created| {
                 let now = chrono::Utc::now();
-                (now - created.with_timezone(&chrono::Utc)).num_days().max(0) as u64
+                (now - created.with_timezone(&chrono::Utc))
+                    .num_days()
+                    .max(0) as u64
             })
             .unwrap_or(0);
 
@@ -256,7 +270,9 @@ impl AttentionOracle {
     pub fn evict_expired_cache(&self) {
         let now = Instant::now();
         let ttl = Duration::from_secs(CACHE_TTL_SECS);
-        let stale_keys: Vec<CacheKey> = self.signature_cache.iter()
+        let stale_keys: Vec<CacheKey> = self
+            .signature_cache
+            .iter()
             .filter(|entry| now.duration_since(entry.value().created_at) > ttl)
             .map(|entry| entry.key().clone())
             .collect();
@@ -295,10 +311,7 @@ impl AttentionOracle {
             }
         }
 
-        let base_url = format!(
-            "https://api.github.com/users/{}/starred",
-            agent_github_id
-        );
+        let base_url = format!("https://api.github.com/users/{}/starred", agent_github_id);
 
         let mut found = false;
         let mut page: u32 = 1;
@@ -313,10 +326,13 @@ impl AttentionOracle {
                 req = req.header("Authorization", format!("Bearer {}", token));
             }
 
-            let resp = req.send().await.map_err(|e| VMError::ExternalResolutionFailed {
-                uri: url.clone(),
-                reason: format!("Oracle fetch network error: {}", e),
-            })?;
+            let resp = req
+                .send()
+                .await
+                .map_err(|e| VMError::ExternalResolutionFailed {
+                    uri: url.clone(),
+                    reason: format!("Oracle fetch network error: {}", e),
+                })?;
 
             if !resp.status().is_success() {
                 return Err(VMError::ExternalResolutionFailed {
@@ -325,18 +341,22 @@ impl AttentionOracle {
                 });
             }
 
-            let repos: Vec<serde_json::Value> = resp.json().await.map_err(|e| {
-                VMError::ExternalResolutionFailed {
-                    uri: url.clone(),
-                    reason: format!("Failed to parse GitHub starred repos JSON: {}", e),
-                }
-            })?;
+            let repos: Vec<serde_json::Value> =
+                resp.json()
+                    .await
+                    .map_err(|e| VMError::ExternalResolutionFailed {
+                        uri: url.clone(),
+                        reason: format!("Failed to parse GitHub starred repos JSON: {}", e),
+                    })?;
 
             if repos.is_empty() {
                 break;
             }
 
-            if repos.iter().any(|repo| repo["full_name"].as_str() == Some(target_repo)) {
+            if repos
+                .iter()
+                .any(|repo| repo["full_name"].as_str() == Some(target_repo))
+            {
                 found = true;
                 break;
             }
@@ -349,15 +369,25 @@ impl AttentionOracle {
 
         if found {
             let signature = self
-                .sign_payout(chain_id, contract_addr, campaign_id, agent_eth_addr, payout, deadline)
+                .sign_payout(
+                    chain_id,
+                    contract_addr,
+                    campaign_id,
+                    agent_eth_addr,
+                    payout,
+                    deadline,
+                )
                 .map_err(|e| VMError::ExternalResolutionFailed {
                     uri: base_url.clone(),
                     reason: e,
                 })?;
-            self.signature_cache.insert(cache_key, CacheEntry {
-                signature: signature.clone(),
-                created_at: Instant::now(),
-            });
+            self.signature_cache.insert(
+                cache_key,
+                CacheEntry {
+                    signature: signature.clone(),
+                    created_at: Instant::now(),
+                },
+            );
             return Ok(signature);
         }
 

@@ -7,7 +7,7 @@ authors = ["0-protocol <sjhddh>"]
 
 [dependencies]
 zerolang = { git = "https://github.com/0-protocol/0-lang", rev = "f7390cb" }
-libp2p = { version = "0.53", features = ["tokio", "gossipsub", "tcp", "noise", "yamux", "macros"] }
+libp2p = { version = "0.53", features = ["tokio", "gossipsub", "tcp", "noise", "yamux", "macros", "mdns"] }
 tokio = { version = "1.32", features = ["full"] }
 axum = "0.6"
 tower-http = { version = "0.4", features = ["cors"] }

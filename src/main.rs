@@ -5,17 +5,17 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use libp2p::{gossipsub, swarm::SwarmEvent};
+use dashmap::DashMap;
+use futures::StreamExt;
+use libp2p::{gossipsub, mdns, swarm::SwarmEvent};
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Keccak256};
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
-use futures::StreamExt;
-use dashmap::DashMap;
-use parking_lot::Mutex;
 use tokio::sync::{mpsc, Semaphore};
-use tracing::{info, warn, error};
+use tracing::{error, info, warn};
 
 mod network;
 mod oracle;
@@ -89,10 +89,7 @@ fn load_oracle_key() -> Result<[u8; 32], Box<dyn std::error::Error>> {
         let bytes = hex::decode(hex_key.trim_start_matches("0x"))
             .map_err(|e| format!("ORACLE_PRIVATE_KEY is not valid hex: {}", e))?;
         if bytes.len() != 32 {
-            return Err(format!(
-                "ORACLE_PRIVATE_KEY must be 32 bytes, got {}",
-                bytes.len()
-            ).into());
+            return Err(format!("ORACLE_PRIVATE_KEY must be 32 bytes, got {}", bytes.len()).into());
         }
         let mut key = [0u8; 32];
         key.copy_from_slice(&bytes);
@@ -105,10 +102,9 @@ fn load_oracle_key() -> Result<[u8; 32], Box<dyn std::error::Error>> {
         let bytes = hex::decode(contents.trim().trim_start_matches("0x"))
             .map_err(|e| format!("ORACLE_KEY_FILE contains invalid hex: {}", e))?;
         if bytes.len() != 32 {
-            return Err(format!(
-                "ORACLE_KEY_FILE key must be 32 bytes, got {}",
-                bytes.len()
-            ).into());
+            return Err(
+                format!("ORACLE_KEY_FILE key must be 32 bytes, got {}", bytes.len()).into(),
+            );
         }
         let mut key = [0u8; 32];
         key.copy_from_slice(&bytes);
@@ -117,7 +113,8 @@ fn load_oracle_key() -> Result<[u8; 32], Box<dyn std::error::Error>> {
 
     Err("ORACLE_PRIVATE_KEY or ORACLE_KEY_FILE must be set. \
          The node refuses to start without an explicit oracle key to prevent \
-         accidental use of a well-known default in production.".into())
+         accidental use of a well-known default in production."
+        .into())
 }
 
 fn hex_to_32(s: &str) -> Result<[u8; 32], String> {
@@ -155,7 +152,11 @@ fn validate_intent(intent: &AdIntent) -> bool {
     true
 }
 
-fn check_api_key(headers: &HeaderMap, expected: &Option<String>, require_auth: bool) -> Result<(), StatusCode> {
+fn check_api_key(
+    headers: &HeaderMap,
+    expected: &Option<String>,
+    require_auth: bool,
+) -> Result<(), StatusCode> {
     let secret = match expected {
         Some(s) => s,
         None => {
@@ -171,7 +172,11 @@ fn check_api_key(headers: &HeaderMap, expected: &Option<String>, require_auth: b
     }
 }
 
-fn extract_rate_key(headers: &HeaderMap, req_identifier: Option<&str>, peer_ip: Option<&str>) -> String {
+fn extract_rate_key(
+    headers: &HeaderMap,
+    req_identifier: Option<&str>,
+    peer_ip: Option<&str>,
+) -> String {
     if let Some(key) = headers.get("x-api-key").and_then(|v| v.to_str().ok()) {
         return format!("apikey:{}", key);
     }
@@ -208,7 +213,10 @@ impl SlidingWindowRateLimiter {
 
     fn check(&self, key: &str) -> bool {
         let now = Instant::now();
-        let entry = self.windows.entry(key.to_string()).or_insert_with(|| Mutex::new(VecDeque::new()));
+        let entry = self
+            .windows
+            .entry(key.to_string())
+            .or_insert_with(|| Mutex::new(VecDeque::new()));
         let mut timestamps = entry.lock();
 
         let cutoff = now - std::time::Duration::from_secs(self.window_secs);
@@ -226,7 +234,9 @@ impl SlidingWindowRateLimiter {
     fn evict_stale(&self) {
         let now = Instant::now();
         let cutoff = now - std::time::Duration::from_secs(self.window_secs * 2);
-        let stale_keys: Vec<String> = self.windows.iter()
+        let stale_keys: Vec<String> = self
+            .windows
+            .iter()
             .filter(|entry| {
                 let ts = entry.value().lock();
                 ts.is_empty() || ts.back().map_or(true, |t| *t < cutoff)
@@ -260,7 +270,12 @@ impl CampaignVerifier {
             .build()
             .expect("Failed to build RPC client");
 
-        Self { rpc_url, contract_addr, client, selector }
+        Self {
+            rpc_url,
+            contract_addr,
+            client,
+            selector,
+        }
     }
 
     /// Returns true if the campaign exists on-chain and has budget >= payout.
@@ -331,10 +346,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Starting 0-ads Billboard Node (Sun Force Edition)...");
 
     let oracle_key = load_oracle_key()?;
-    let oracle = Arc::new(
-        oracle::AttentionOracle::new(oracle_key)
-            .expect("Failed to initialize Oracle"),
-    );
+    let oracle =
+        Arc::new(oracle::AttentionOracle::new(oracle_key).expect("Failed to initialize Oracle"));
 
     info!("Oracle address: 0x{}", oracle.public_address_hex());
 
@@ -361,7 +374,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(60);
-    info!("Oracle rate limit: {} requests per minute per key", rate_limit_rpm);
+    info!(
+        "Oracle rate limit: {} requests per minute per key",
+        rate_limit_rpm
+    );
 
     let (gossipsub_tx, mut gossipsub_rx) = mpsc::unbounded_channel::<Vec<u8>>();
 
@@ -370,7 +386,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .unwrap_or_else(|_| "https://sepolia.base.org".to_string());
         let contract = std::env::var("ESCROW_CONTRACT_ADDR")
             .unwrap_or_else(|_| DEFAULT_ESCROW_CONTRACT.to_string());
-        info!("On-chain campaign verification enabled: contract={} rpc={}", contract, rpc_url);
+        info!(
+            "On-chain campaign verification enabled: contract={} rpc={}",
+            contract, rpc_url
+        );
         Some(Arc::new(CampaignVerifier::new(rpc_url, contract)))
     };
 
@@ -438,7 +457,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 info!("Billboard HTTP API listening on {} with TLS", addr);
                 let rustls_config = match axum_server::tls_rustls::RustlsConfig::from_pem_file(
                     &cert_path, &key_path,
-                ).await {
+                )
+                .await
+                {
                     Ok(cfg) => cfg,
                     Err(e) => {
                         if allow_tls_fallback {
@@ -520,7 +541,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if !validate_intent(&intent) {
                         continue;
                     }
-                    if verify_state.active_intents.contains_key(&intent.campaign_id) {
+                    if verify_state
+                        .active_intents
+                        .contains_key(&intent.campaign_id)
+                    {
                         continue;
                     }
 
@@ -540,6 +564,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
 
+            // Periodically compact stale keys from unverified_order. This keeps
+            // the FIFO queue bounded even when intents are promoted to active_intents.
+            if eviction_counter % 12 == 0 {
+                let mut order = verify_state.unverified_order.lock();
+                order.retain(|k| verify_state.unverified_intents.contains_key(k));
+            }
+
             if eviction_counter % 60 == 0 {
                 verify_state.rate_limiter.evict_stale();
                 verify_state.oracle.evict_expired_cache();
@@ -552,7 +583,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     loop {
         tokio::select! {
             event = swarm.select_next_some() => match event {
-                SwarmEvent::Behaviour(gossipsub::Event::Message { message, .. }) => {
+                SwarmEvent::Behaviour(network::BehaviourEvent::Gossipsub(
+                    gossipsub::Event::Message { message, .. }
+                )) => {
                     info!("Received Ad Intent over Gossipsub");
                     if state.unverified_intents.len() < MAX_UNVERIFIED_INTENTS {
                         if let Ok(intent) = serde_json::from_slice::<AdIntent>(&message.data) {
@@ -562,13 +595,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                 }
+                SwarmEvent::Behaviour(network::BehaviourEvent::Mdns(mdns::Event::Discovered(peers))) => {
+                    for (peer_id, addr) in peers {
+                        info!("mDNS discovered peer {} at {}", peer_id, addr);
+                        swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
+                    }
+                }
+                SwarmEvent::Behaviour(network::BehaviourEvent::Mdns(mdns::Event::Expired(peers))) => {
+                    for (peer_id, addr) in peers {
+                        info!("mDNS peer expired {} at {}", peer_id, addr);
+                        swarm.behaviour_mut().gossipsub.remove_explicit_peer(&peer_id);
+                    }
+                }
                 SwarmEvent::NewListenAddr { address, .. } => {
                     info!("P2P Node listening on {:?}", address);
                 }
                 _ => {}
             },
             Some(data) = gossipsub_rx.recv() => {
-                if let Err(e) = swarm.behaviour_mut().publish(ad_topic.clone(), data) {
+                if let Err(e) = swarm.behaviour_mut().gossipsub.publish(ad_topic.clone(), data) {
                     warn!("Failed to publish intent to Gossipsub: {:?}", e);
                 }
             },
@@ -614,7 +659,9 @@ async fn broadcast_intent(
     if !validate_intent(&intent) {
         return (
             StatusCode::BAD_REQUEST,
-            AxumJson(serde_json::json!({"error": "Invalid intent: missing fields or budget < payout"})),
+            AxumJson(
+                serde_json::json!({"error": "Invalid intent: missing fields or budget < payout"}),
+            ),
         );
     }
     if state.unverified_intents.len() >= MAX_UNVERIFIED_INTENTS {
@@ -624,7 +671,10 @@ async fn broadcast_intent(
         );
     }
 
-    info!("Queuing campaign {} for on-chain verification", intent.campaign_id);
+    info!(
+        "Queuing campaign {} for on-chain verification",
+        intent.campaign_id
+    );
 
     if let Ok(data) = serde_json::to_vec(&intent) {
         if let Err(e) = state.gossipsub_tx.send(data) {
@@ -637,7 +687,9 @@ async fn broadcast_intent(
     state.unverified_order.lock().push_back(key);
     (
         StatusCode::OK,
-        AxumJson(serde_json::json!({"message": "Intent queued for on-chain verification and Gossipsub broadcast"})),
+        AxumJson(
+            serde_json::json!({"message": "Intent queued for on-chain verification and Gossipsub broadcast"}),
+        ),
     )
 }
 
@@ -695,7 +747,13 @@ async fn verify_proof(
     let a_addr = match hex_to_20(&req.agent_eth_addr) {
         Ok(v) => v,
         Err(e) => {
-            return (StatusCode::BAD_REQUEST, Json(VerifyResponse { signature: String::new(), error: Some(e) }));
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(VerifyResponse {
+                    signature: String::new(),
+                    error: Some(e),
+                }),
+            );
         }
     };
 
@@ -704,7 +762,10 @@ async fn verify_proof(
         Err(_) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(VerifyResponse { signature: String::new(), error: Some("Invalid wallet_sig hex".into()) }),
+                Json(VerifyResponse {
+                    signature: String::new(),
+                    error: Some("Invalid wallet_sig hex".into()),
+                }),
             );
         }
     };
@@ -716,11 +777,18 @@ async fn verify_proof(
     ) {
         return (
             StatusCode::FORBIDDEN,
-            Json(VerifyResponse { signature: String::new(), error: Some(e) }),
+            Json(VerifyResponse {
+                signature: String::new(),
+                error: Some(e),
+            }),
         );
     }
 
-    match state.sybil_policy.check(&state.sybil_client, &req.agent_github_id).await {
+    match state
+        .sybil_policy
+        .check(&state.sybil_client, &req.agent_github_id)
+        .await
+    {
         oracle::SybilVerdict::Deny(reason) => {
             warn!("Anti-sybil rejected {}: {}", req.agent_github_id, reason);
             return (
@@ -737,13 +805,25 @@ async fn verify_proof(
     let c_addr = match hex_to_20(&req.contract_addr) {
         Ok(v) => v,
         Err(e) => {
-            return (StatusCode::BAD_REQUEST, Json(VerifyResponse { signature: String::new(), error: Some(e) }));
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(VerifyResponse {
+                    signature: String::new(),
+                    error: Some(e),
+                }),
+            );
         }
     };
     let c_id = match hex_to_32(&req.campaign_id) {
         Ok(v) => v,
         Err(e) => {
-            return (StatusCode::BAD_REQUEST, Json(VerifyResponse { signature: String::new(), error: Some(e) }));
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(VerifyResponse {
+                    signature: String::new(),
+                    error: Some(e),
+                }),
+            );
         }
     };
 
@@ -840,7 +920,13 @@ pub async fn verify_graph_execution(
     .await;
 
     match res {
-        Ok(Ok(sig)) => (StatusCode::OK, Json(VerifyResponse { signature: sig, error: None })),
+        Ok(Ok(sig)) => (
+            StatusCode::OK,
+            Json(VerifyResponse {
+                signature: sig,
+                error: None,
+            }),
+        ),
         Ok(Err(_)) | Err(_) => {
             error!("Graph execution failed");
             (
