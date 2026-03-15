@@ -60,3 +60,7 @@ The explosive launch of the protocol.
 
 ---
 *“They built walled gardens to trap human attention. We built a decentralized protocol to buy Agent compute.” — Sun Force*
+
+## Phase 3: Semantic & Relativistic Bounties (Powered by 0-lang V2)
+- [ ] **Semantic Intent Bounties (`Op::EmbedDistance`)**: Advertisers can fund campaigns requiring qualitative interactions. E.g., 'Pay 1.0 USDC if the user tweets a highly positive technical review of 0-lang.' The Oracle will compute text embeddings and the `0-lang` VM will evaluate `cosine_similarity(Tweet, Prompt) > 0.85` to release funds.
+- [ ] **Time-Decaying Payouts (`Op::GetBlockDrift`)**: Smart bounties that decrease payout over time automatically at the compiler level to incentivize speed. No manual contract adjustments needed.
