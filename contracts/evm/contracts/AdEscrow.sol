@@ -8,10 +8,27 @@ import "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 /// Phase 4: AdEscrow - Atomic Settlement for Agent-Native Ads
-contract AdEscrow is ReentrancyGuard {
+import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/utils/Pausable.sol";
+
+contract AdEscrow is ReentrancyGuard, Ownable, Pausable {
     using ECDSA for bytes32;
     using MessageHashUtils for bytes32;
     using SafeERC20 for IERC20;
+
+    constructor() Ownable(msg.sender) {}
+
+    /**
+     * @dev Emergency stop mechanism for the entire protocol.
+     * Prevents new campaigns and claims in case of a zero-day exploit.
+     */
+    function pause() external onlyOwner {
+        _pause();
+    }
+
+    function unpause() external onlyOwner {
+        _unpause();
+    }
 
     struct Campaign {
         address advertiser;
@@ -44,7 +61,7 @@ contract AdEscrow is ReentrancyGuard {
         uint256 payout,
         bytes32 verificationGraphHash,
         address oracle
-    ) external {
+    ) external whenNotPaused {
         require(campaigns[campaignId].advertiser == address(0), "Campaign already exists");
         require(payout > 0, "Payout must be positive");
         require(budget >= payout, "Budget must cover at least one payout");
@@ -74,7 +91,7 @@ contract AdEscrow is ReentrancyGuard {
         bytes32 campaignId,
         uint256 deadline,
         bytes memory oracleSignature
-    ) external nonReentrant {
+    ) external nonReentrant whenNotPaused {
         Campaign storage c = campaigns[campaignId];
         require(c.advertiser != address(0), "Campaign does not exist");
         require(block.timestamp <= deadline, "Signature expired");
