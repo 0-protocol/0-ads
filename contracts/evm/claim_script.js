@@ -14,7 +14,8 @@ async function main() {
   console.log(`🤖 Agent Identity: ${wallet.address}`);
 
   console.log("\n[2] Generating Wallet Ownership Proof...");
-  const msg = `0-ads-wallet-bind:${githubId}`;
+  const bindTimestamp = Math.floor(Date.now() / 1000);
+  const msg = `0-ads-wallet-bind:${githubId}:${bindTimestamp}`;
   const walletSig = await wallet.signMessage(msg);
 
   const payload = {
@@ -26,7 +27,8 @@ async function main() {
       agent_eth_addr: wallet.address,
       payout: payoutAmount,
       deadline: Math.floor(Date.now() / 1000) + 3600,
-      wallet_sig: walletSig
+      wallet_sig: walletSig,
+      bind_timestamp: bindTimestamp
   };
 
   console.log("\n[3] Requesting Cryptographic Proof from 0-ads Oracle...");
@@ -62,7 +64,7 @@ async function main() {
   try {
       const tx = await AdEscrow.claimPayout(
           campaignId,
-          resData.deadline,
+          payload.deadline,
           signature
       );
       console.log("Transaction sent! Waiting for confirmation...");

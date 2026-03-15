@@ -1,4 +1,5 @@
 const hre = require("hardhat");
+const fs = require("fs");
 
 async function main() {
     console.log("🚀 [Sun Force - Mainnet] Initiating AdEscrow Deployment to Base Mainnet");
@@ -36,9 +37,24 @@ async function main() {
     console.log(`🎉 AdEscrow successfully deployed to Base Mainnet at: ${address}`);
     console.log("----------------------------------------------------------------------");
     
+    // Post-deploy ownership transfer to multisig/Safe.
+    // Set SAFE_ADDRESS env var to transfer ownership immediately after deploy.
+    const safeAddress = process.env.SAFE_ADDRESS;
+    if (safeAddress) {
+        console.log(`[~] Transferring ownership to Safe: ${safeAddress}`);
+        const tx = await escrow.transferOwnership(safeAddress);
+        console.log(`[~] Ownership transfer tx: ${tx.hash}`);
+        await tx.wait();
+        console.log(`[+] Ownership transferred. New owner: ${await escrow.owner()}`);
+    } else {
+        console.log(
+            "⚠️ WARNING: SAFE_ADDRESS not set. Owner remains the deployer EOA.\n" +
+            "For production, transfer ownership to a multisig immediately."
+        );
+    }
+
     // Write out the address for future scripts
-    const fs = require('fs');
-    fs.writeFileSync('mainnet_address.json', JSON.stringify({ AdEscrow: address }, null, 2));
+    fs.writeFileSync("mainnet_address.json", JSON.stringify({ AdEscrow: address }, null, 2));
 }
 
 main().catch((error) => {

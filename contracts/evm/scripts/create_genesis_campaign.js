@@ -41,16 +41,14 @@ async function main() {
     await tx.wait();
     console.log(`[+] Approval confirmed.`);
 
-    // 3. Create Campaign
-    const CAMPAIGN_ID = "0x0000000000000000000000000000000000000000000000000000000000000001";
+    // 3. Create Campaign (campaignId is derived on-chain and emitted in CampaignCreated)
     // Mock hash of the verification graph JSON defining the task
     const VERIFICATION_GRAPH_HASH = hre.ethers.keccak256(hre.ethers.toUtf8Bytes("github_star:0-protocol/0-lang"));
     // Oracle public key (can be same as deployer for now or a dedicated oracle node key)
     const ORACLE_ADDR = deployer.address;
 
-    console.log(`[~] Creating Campaign ${CAMPAIGN_ID}...`);
+    console.log(`[~] Creating genesis campaign...`);
     tx = await AdEscrow.createCampaign(
-        CAMPAIGN_ID,
         usdcAddr,
         TOTAL_BUDGET,
         PAYOUT,
@@ -58,10 +56,25 @@ async function main() {
         ORACLE_ADDR
     );
     console.log(`[~] Create Campaign Tx: ${tx.hash}`);
-    await tx.wait();
+    const receipt = await tx.wait();
+    const created = receipt.logs
+        .map((log) => {
+            try {
+                return AdEscrow.interface.parseLog(log);
+            } catch (_) {
+                return null;
+            }
+        })
+        .find((event) => event && event.name === "CampaignCreated");
+
+    if (!created) {
+        throw new Error("CampaignCreated event not found. Could not extract campaign ID.");
+    }
+    const campaignId = created.args.campaignId;
     
     console.log("✅ -------------------------------------------------------------------");
     console.log(`🎉 Campaign Successfully Created and Seeded with 500 USDC!`);
+    console.log(`🆔 Campaign ID: ${campaignId}`);
     console.log("----------------------------------------------------------------------");
 }
 
