@@ -1,10 +1,11 @@
-# 0-ads Blackhat Security Audit Report — V3 (Final Close)
+# 0-ads Blackhat Security Audit Report — V4
 
 **Auditor**: Independent Red Team (Blackhat-to-Redhat Perspective)
 **Initial Audit**: 2026-03-15 (23 findings, HIGH risk)
 **V2 Re-Audit**: 2026-03-15 (post V5 remediation `60bd065` — 8 new findings, MEDIUM risk)
-**V3 Final Close**: 2026-03-15 (post V6 remediation `b3f4d57` — this report)
-**Scope**: Full-stack — EVM smart contract, Rust oracle/P2P node, Python relayer/SDK
+**V3 Final Close**: 2026-03-15 (post V6 remediation `b3f4d57` — 30/31 resolved, LOW risk)
+**V4 Addendum**: 2026-03-15 (new scripts audit `32c6143` — 4 new findings in deployment scripts)
+**Scope**: Full-stack — EVM smart contract, Rust oracle/P2P node, Python relayer/SDK, deployment scripts
 **Method**: Adversarial code review, attack tree analysis, mainnet threat modeling
 
 ---
@@ -777,4 +778,124 @@ The off-chain stack (oracle, billboard, relayer, MCP) has proper authentication,
 
 ---
 
-*This report was produced through three rounds of adversarial code review with a blackhat mindset. All attack scenarios described are for defensive purposes. No exploits were executed against live systems.*
+## Part 6: V4 Addendum — New Scripts Audit (commit `32c6143`)
+
+Commit `32c6143` adds 5 new operational scripts and updates the Hardhat config. Four of these have security issues that must be fixed before mainnet.
+
+---
+
+### V4-CRIT-01: `create_genesis_campaign.js` Uses Old Contract ABI — Will Fail On-Chain
+
+**Severity**: Critical (deployment blocker)
+**File**: `contracts/evm/scripts/create_genesis_campaign.js:52-59`
+
+```javascript
+tx = await AdEscrow.createCampaign(
+    CAMPAIGN_ID,       // <-- This parameter no longer exists
+    usdcAddr,
+    TOTAL_BUDGET,
+    PAYOUT,
+    VERIFICATION_GRAPH_HASH,
+    ORACLE_ADDR
+);
+```
+
+The contract's `createCampaign` was refactored in V6 (`b3f4d57`) to derive campaign IDs internally. The function signature is now `createCampaign(IERC20, uint256, uint256, bytes32, address)` — 5 parameters, not 6. This script passes 6 parameters and **will revert on-chain**.
+
+**Fix**: Remove the `CAMPAIGN_ID` parameter and capture the returned ID from the event:
+
+```javascript
+tx = await AdEscrow.createCampaign(
+    usdcAddr, TOTAL_BUDGET, PAYOUT, VERIFICATION_GRAPH_HASH, ORACLE_ADDR
+);
+const receipt = await tx.wait();
+// Extract campaignId from CampaignCreated event
+```
+
+---
+
+### V4-HIGH-01: `claim_script.js` Uses Old Wallet-Bind Format — Oracle Will Reject
+
+**Severity**: High
+**File**: `contracts/evm/claim_script.js:17`
+
+```javascript
+const msg = `0-ads-wallet-bind:${githubId}`;
+```
+
+The oracle was upgraded in V5 (`60bd065`) to require a timestamped challenge: `0-ads-wallet-bind:{githubId}:{timestamp}`. This script uses the old format without a timestamp. The production oracle will reject it with "Wallet-bind challenge expired" (since `bind_timestamp` defaults to 0).
+
+Additionally, line 66 reads `resData.deadline`, but the oracle response doesn't contain a `deadline` field — the deadline was in the request payload.
+
+**Fix**:
+
+```javascript
+const bindTimestamp = Math.floor(Date.now() / 1000);
+const msg = `0-ads-wallet-bind:${githubId}:${bindTimestamp}`;
+// Add bind_timestamp to payload
+// Use payload.deadline (not resData.deadline) for the on-chain call
+```
+
+---
+
+### V4-HIGH-02: `deploy_mainnet.js` Has No Ownership Transfer to Multisig
+
+**Severity**: High
+**File**: `contracts/evm/scripts/deploy_mainnet.js`
+
+The mainnet deploy script deploys `AdEscrow` but does not transfer ownership to a multisig (Gnosis Safe). The existing `deploy.js` has `SAFE_ADDRESS` logic — this new mainnet script lacks it entirely. If used as-is on mainnet, the deployer EOA remains the sole owner with power to `pause()` the entire protocol.
+
+The script also writes the address to `mainnet_address.json` in the working directory, which could be committed to git if `.gitignore` doesn't cover it.
+
+**Fix**: Port the `SAFE_ADDRESS` ownership transfer from `deploy.js`. Add `mainnet_address.json` to `.gitignore`.
+
+---
+
+### V4-MED-01: `bypass_claim.js` Is a Self-Signing Attack Tool
+
+**Severity**: Medium (operational risk)
+**File**: `contracts/evm/bypass_claim.js`
+
+This script generates an oracle signature using the caller's own private key and calls `claimPayout`. It is labeled "Forged Oracle Signature" in the output. While this only works if the caller IS the oracle (since the contract verifies the signer matches the campaign's oracle address), having this script in the repo is problematic:
+
+1. It provides a ready-made template for attackers to test oracle key compromise.
+2. The name "bypass_claim" implies it circumvents security — it doesn't, but it creates confusion.
+3. If a developer accidentally uses the oracle private key as `PRIVATE_KEY`, real funds could be claimed without verification.
+
+**Fix**: Rename to `dev_oracle_self_claim.js` with a clear header comment explaining it's for testing only and requires the oracle key. Or remove from the repo entirely.
+
+---
+
+### V4-LOW-01: `hardhat.config.js` Optimizer Enabled
+
+**Severity**: Low (positive change)
+**File**: `contracts/evm/hardhat.config.js:10-13`
+
+```javascript
+optimizer: {
+    enabled: true,
+    runs: 200
+}
+```
+
+Optimizer with 200 runs is standard for deployment (balances deploy cost vs runtime cost). This reduces gas costs. The `base_mainnet` network configuration uses a separate `MAINNET_PRIVATE_KEY` env var, which is good practice (isolates testnet and mainnet keys).
+
+**Status**: No issues.
+
+---
+
+### V4 Summary
+
+| ID | Severity | File | Issue | Status |
+|----|----------|------|-------|--------|
+| V4-CRIT-01 | Critical | `create_genesis_campaign.js` | Uses 6-param ABI, contract expects 5 | **MUST FIX** |
+| V4-HIGH-01 | High | `claim_script.js` | Old wallet-bind format, wrong deadline field | **MUST FIX** |
+| V4-HIGH-02 | High | `deploy_mainnet.js` | No multisig ownership transfer | **MUST FIX** |
+| V4-MED-01 | Medium | `bypass_claim.js` | Self-signing tool in repo | **RENAME/REMOVE** |
+| V4-LOW-01 | Low | `hardhat.config.js` | Optimizer enabled | No action needed |
+
+**Risk rating**: Unchanged at LOW for the core protocol. These are operational script issues, not contract vulnerabilities. But V4-CRIT-01 and V4-HIGH-02 are mainnet deployment blockers.
+
+---
+
+*This report was produced through four rounds of adversarial code review with a blackhat mindset. All attack scenarios described are for defensive purposes. No exploits were executed against live systems.*
