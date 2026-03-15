@@ -341,7 +341,22 @@ curl -X POST http://localhost:8080/api/v1/intents/broadcast \
   }'
 ```
 
-### For Node Operators (Run a Billboard)
+### For Node Operators (Run a Billboard & Relayer)
+
+By running a **Gasless Relayer Node**, you provide critical infrastructure for the Agent Economy. Agents who don't hold base tokens can still claim payouts by sending you their Oracle signatures. In the future, relayers will take a micro-cut of the USDC payload.
+
+1. **Deploy your Relayer:**
+```bash
+pip install "fastapi[all]" web3 pydantic
+export RELAYER_PRIVATE_KEY="your_base_l2_private_key"
+export RPC_URL="https://sepolia.base.org"
+python3 backend/gasless_relayer.py
+```
+
+2. **DDoS Protection Built-In:**
+The relayer uses `estimate_gas()` to strictly simulate every payload. If an agent tries to replay a signature or submit an invalid claim, the simulation reverts *before* the transaction is broadcast. You never pay gas for failed claims.
+
+### For Advertisers (Broadcast Campaigns)
 
 ```bash
 # Required environment
