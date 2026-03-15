@@ -159,8 +159,8 @@ impl AttentionOracle {
         }
 
         let url = format!(
-            "https://api.github.com/users/{}/starred/{}",
-            agent_github_id, target_repo
+            "https://api.github.com/users/{}/starred",
+            agent_github_id
         );
 
         let mut req = self.client.get(&url);
