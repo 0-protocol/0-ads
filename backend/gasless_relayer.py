@@ -21,10 +21,18 @@ CHAIN_ID = int(os.environ.get("CHAIN_ID", 84532))
 RELAYER_PRIVATE_KEY = os.environ.get("RELAYER_PRIVATE_KEY")
 CONTRACT_ADDRESS = os.environ.get("CONTRACT_ADDRESS", "0x8a2aD6bC4A240515c49035bE280BacB7CA94afC4")
 RELAYER_API_KEYS: set = set(filter(None, os.environ.get("RELAYER_API_KEYS", "").split(",")))
+REQUIRE_RELAYER_AUTH: bool = os.environ.get("RELAYER_AUTH_REQUIRED", "true").lower() not in ("false", "0", "off")
 RATE_LIMIT_PER_MIN: int = int(os.environ.get("RELAYER_RATE_LIMIT_RPM", "30"))
+TRUSTED_PROXY_IPS: set = set(filter(None, os.environ.get("TRUSTED_PROXY_IPS", "").split(",")))
 
 if not RELAYER_PRIVATE_KEY:
     logger.warning("RELAYER_PRIVATE_KEY is missing! Relayer will start in dry-run mode.")
+
+if REQUIRE_RELAYER_AUTH and not RELAYER_API_KEYS:
+    logger.warning(
+        "RELAYER_AUTH_REQUIRED=true (default) but RELAYER_API_KEYS is empty. "
+        "All relay requests will be rejected until API keys are configured."
+    )
 
 w3 = Web3(Web3.HTTPProvider(RPC_URL))
 try:
@@ -106,11 +114,22 @@ rate_limiter = IPRateLimiter(RATE_LIMIT_PER_MIN)
 # ---------------------------------------------------------------------------
 
 def _client_ip(request: Request) -> str:
-    return request.client.host if request.client else "unknown"
+    peer = request.client.host if request.client else "unknown"
+    if TRUSTED_PROXY_IPS and peer in TRUSTED_PROXY_IPS:
+        forwarded = request.headers.get("x-forwarded-for", "")
+        if forwarded:
+            return forwarded.split(",")[0].strip()
+    return peer
 
 
 async def verify_api_key(request: Request):
     if not RELAYER_API_KEYS:
+        if REQUIRE_RELAYER_AUTH:
+            raise HTTPException(
+                status_code=503,
+                detail="Relayer auth is required but no RELAYER_API_KEYS configured. "
+                       "Set RELAYER_API_KEYS or RELAYER_AUTH_REQUIRED=false for development."
+            )
         return
     key = request.headers.get("x-api-key", "")
     if key not in RELAYER_API_KEYS:

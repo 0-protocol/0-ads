@@ -45,7 +45,8 @@ contract AdEscrow is ReentrancyGuard, Ownable, Pausable {
     uint256 public constant CANCEL_COOLDOWN = 7 days;
     uint256 public constant ORACLE_GRACE_PERIOD = 1 hours;
     uint256 public constant MAX_DEADLINE_WINDOW = 2 hours;
-    uint256 public campaignNonce;
+
+    mapping(address => uint256) public campaignNonces;
 
     mapping(bytes32 => Campaign) public campaigns;
     mapping(bytes32 => mapping(address => bool)) public hasClaimed;
@@ -57,15 +58,21 @@ contract AdEscrow is ReentrancyGuard, Ownable, Pausable {
     event OracleUpdated(bytes32 indexed campaignId, address indexed oldOracle, address indexed newOracle);
     event DustSwept(bytes32 indexed campaignId, address indexed advertiser, uint256 amount);
 
+    /// @notice Preview the next campaign ID for a given sender without consuming the nonce.
+    function previewCampaignId(address sender) external view returns (bytes32) {
+        return keccak256(abi.encodePacked(sender, campaignNonces[sender]));
+    }
+
     function createCampaign(
-        bytes32 campaignId,
         IERC20 token,
         uint256 budget,
         uint256 payout,
         bytes32 verificationGraphHash,
         address oracle
-    ) external whenNotPaused {
-        require(campaigns[campaignId].advertiser == address(0), "Campaign already exists");
+    ) external whenNotPaused returns (bytes32 campaignId) {
+        campaignId = keccak256(abi.encodePacked(msg.sender, campaignNonces[msg.sender]));
+        campaignNonces[msg.sender]++;
+
         require(payout > 0, "Payout must be positive");
         require(budget >= payout, "Budget must cover at least one payout");
         require(oracle != address(0), "Oracle cannot be zero address");
@@ -191,7 +198,7 @@ contract AdEscrow is ReentrancyGuard, Ownable, Pausable {
 
     /// @notice Allows the advertiser to recover residual tokens when
     ///         budget < payout (campaign effectively exhausted).
-    function sweepDust(bytes32 campaignId) external nonReentrant {
+    function sweepDust(bytes32 campaignId) external nonReentrant whenNotPaused {
         Campaign storage c = campaigns[campaignId];
         require(c.advertiser == msg.sender, "Only advertiser can sweep");
         require(c.budget > 0, "No dust to sweep");
@@ -203,13 +210,5 @@ contract AdEscrow is ReentrancyGuard, Ownable, Pausable {
         c.token.safeTransfer(msg.sender, dust);
 
         emit DustSwept(campaignId, msg.sender, dust);
-    }
-
-    /// @notice Generate a deterministic, sender-scoped campaign ID to prevent
-    ///         front-running and namespace squatting.
-    function deriveCampaignId() external returns (bytes32) {
-        bytes32 id = keccak256(abi.encodePacked(msg.sender, campaignNonce));
-        campaignNonce++;
-        return id;
     }
 }

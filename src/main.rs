@@ -67,6 +67,7 @@ pub struct VerifyResponse {
 pub struct AppState {
     active_intents: DashMap<String, AdIntent>,
     unverified_intents: DashMap<String, AdIntent>,
+    unverified_order: Mutex<VecDeque<String>>,
     oracle: Arc<oracle::AttentionOracle>,
     sybil_policy: oracle::SybilPolicy,
     sybil_client: reqwest::Client,
@@ -394,6 +395,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let state = Arc::new(AppState {
         active_intents: DashMap::new(),
         unverified_intents: DashMap::new(),
+        unverified_order: Mutex::new(VecDeque::new()),
         oracle,
         sybil_policy,
         sybil_client,
@@ -427,6 +429,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let tls_cert = std::env::var("TLS_CERT_PATH").ok();
         let tls_key = std::env::var("TLS_KEY_PATH").ok();
 
+        let allow_tls_fallback = std::env::var("ALLOW_TLS_FALLBACK")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false);
+
         match (tls_cert, tls_key) {
             (Some(cert_path), Some(key_path)) => {
                 info!("Billboard HTTP API listening on {} with TLS", addr);
@@ -435,15 +441,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ).await {
                     Ok(cfg) => cfg,
                     Err(e) => {
-                        error!("Failed to load TLS certificates: {}. Falling back to plain HTTP.", e);
-                        info!("Billboard HTTP API listening on {} (plain HTTP — TLS cert load failed)", addr);
-                        if let Err(e) = axum::Server::bind(&addr)
-                            .serve(app.into_make_service())
-                            .await
-                        {
-                            error!("HTTP Server error: {}", e);
+                        if allow_tls_fallback {
+                            warn!("Failed to load TLS certificates: {}. ALLOW_TLS_FALLBACK=true, falling back to plain HTTP.", e);
+                            if let Err(e) = axum::Server::bind(&addr)
+                                .serve(app.into_make_service())
+                                .await
+                            {
+                                error!("HTTP Server error: {}", e);
+                            }
+                            return;
                         }
-                        return;
+                        error!(
+                            "FATAL: TLS was explicitly configured but certificate loading failed: {}. \
+                             Refusing to start insecurely. Set ALLOW_TLS_FALLBACK=true to override.",
+                            e
+                        );
+                        std::process::exit(1);
                     }
                 };
                 if let Err(e) = axum_server::bind_rustls(addr, rustls_config)
@@ -479,16 +492,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             if verify_state.unverified_intents.len() > MAX_UNVERIFIED_INTENTS {
                 let overflow = verify_state.unverified_intents.len() - MAX_UNVERIFIED_INTENTS;
-                let evict_keys: Vec<String> = verify_state
-                    .unverified_intents
-                    .iter()
-                    .take(overflow)
-                    .map(|kv| kv.key().clone())
-                    .collect();
-                for key in evict_keys {
-                    verify_state.unverified_intents.remove(&key);
+                let mut order = verify_state.unverified_order.lock();
+                let mut evicted = 0usize;
+                while evicted < overflow {
+                    match order.pop_front() {
+                        Some(key) => {
+                            if verify_state.unverified_intents.remove(&key).is_some() {
+                                evicted += 1;
+                            }
+                        }
+                        None => break,
+                    }
                 }
-                warn!("Evicted {} oldest unverified intents (LRU)", overflow);
+                warn!("Evicted {} oldest unverified intents (FIFO)", evicted);
             }
 
             let keys: Vec<String> = verify_state
@@ -540,7 +556,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     info!("Received Ad Intent over Gossipsub");
                     if state.unverified_intents.len() < MAX_UNVERIFIED_INTENTS {
                         if let Ok(intent) = serde_json::from_slice::<AdIntent>(&message.data) {
-                            state.unverified_intents.insert(intent.campaign_id.clone(), intent);
+                            let key = intent.campaign_id.clone();
+                            state.unverified_intents.insert(key.clone(), intent);
+                            state.unverified_order.lock().push_back(key);
                         }
                     }
                 }
@@ -614,9 +632,9 @@ async fn broadcast_intent(
         }
     }
 
-    state
-        .unverified_intents
-        .insert(intent.campaign_id.clone(), intent);
+    let key = intent.campaign_id.clone();
+    state.unverified_intents.insert(key.clone(), intent);
+    state.unverified_order.lock().push_back(key);
     (
         StatusCode::OK,
         AxumJson(serde_json::json!({"message": "Intent queued for on-chain verification and Gossipsub broadcast"})),

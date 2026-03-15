@@ -4,6 +4,9 @@ import sys
 import json
 import time
 import logging
+import hashlib
+import getpass
+import uuid
 import requests
 import secrets
 from pathlib import Path
@@ -39,13 +42,30 @@ USDC_ABI = [
 KEYSTORE_DIR = Path(os.environ.get("ZERO_ADS_KEYSTORE_DIR", Path.home() / ".0-ads" / "keys"))
 
 
+def _derive_machine_password() -> str:
+    """Derive a machine-specific password from hardware/user entropy. Not a substitute for a real password."""
+    mac = str(uuid.getnode())
+    user = getpass.getuser()
+    raw = f"0-ads:{mac}:{user}:{KEYSTORE_DIR}".encode()
+    return hashlib.sha256(raw).hexdigest()
+
+
 def _get_persistent_wallet() -> tuple:
     """Load or create a persistent agent wallet stored in an encrypted keyfile."""
     KEYSTORE_DIR.mkdir(parents=True, exist_ok=True)
     keyfile = KEYSTORE_DIR / "agent_wallet.json"
 
     w3 = Web3()
-    password = os.environ.get("ZERO_ADS_WALLET_PASSWORD", "0-ads-default-dev-password")
+    explicit_password = os.environ.get("ZERO_ADS_WALLET_PASSWORD")
+
+    if explicit_password:
+        password = explicit_password
+    else:
+        password = _derive_machine_password()
+        logger.warning(
+            "ZERO_ADS_WALLET_PASSWORD not set. Using a machine-derived password. "
+            "Set ZERO_ADS_WALLET_PASSWORD for production security."
+        )
 
     if keyfile.exists():
         with open(keyfile) as f:

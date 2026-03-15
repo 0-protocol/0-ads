@@ -92,3 +92,16 @@
 - [x] **BH-M07: Relayer 200 on error** — Replaced `return {"error": ...}` with proper `HTTPException` status codes.
 - [x] **BH-L02: SDK non-functional for mainnet** — Implemented real oracle + relayer claim flow in `submit_proof_and_claim`.
 - [x] **BH-L03: Oracle key env var warning** — Added warning log when `ORACLE_PRIVATE_KEY` env var is used.
+
+---
+
+## V2 Re-Audit Remediation (NEW-1 through NEW-8)
+
+- [x] **NEW-1: MCP default wallet password** — Replaced hardcoded password with machine-derived entropy (`uuid.getnode()` + `getpass.getuser()` + keystore path). Loud warning when no explicit password set.
+- [x] **NEW-2: Random intent eviction** — Added FIFO insertion-order tracking via `VecDeque<String>` alongside `DashMap`. Eviction now pops from front of queue instead of arbitrary `DashMap` iteration.
+- [x] **NEW-3: Relayer auth disabled by default** — Changed default to `RELAYER_AUTH_REQUIRED=true`. Empty `RELAYER_API_KEYS` now returns 503. Added `TRUSTED_PROXY_IPS` for safe `x-forwarded-for` parsing.
+- [x] **NEW-4: Campaign ID squatting not enforced** — Removed `campaignId` parameter from `createCampaign`. IDs are now internally derived from `keccak256(msg.sender, nonce)`. Per-sender nonces via `campaignNonces` mapping.
+- [x] **NEW-5: TLS silent fallback** — TLS cert load failure now calls `std::process::exit(1)` unless `ALLOW_TLS_FALLBACK=true` is set.
+- [x] **NEW-6: sweepDust missing whenNotPaused** — Added `whenNotPaused` modifier to `sweepDust`.
+- [x] **NEW-7: deriveCampaignId UX** — Replaced state-changing `deriveCampaignId()` with `view` function `previewCampaignId(address sender)`. Nonce consumed only inside `createCampaign`.
+- [x] **NEW-8: No test coverage for V5 changes** — Added 47+ tests covering `sweepDust`, `previewCampaignId`, `MAX_DEADLINE_WINDOW`, pause guards for all functions, and adapted all existing tests to new `createCampaign` signature.
