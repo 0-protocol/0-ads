@@ -122,9 +122,9 @@ def auto_claim(campaign_id, github_id, repo, payout, private_key=None, gasless=F
     # 5. Profit
     if not tx_hash.startswith("0x"): tx_hash = "0x" + tx_hash
     print(f"\n🎉 SUCCESS! Your AI Agent just earned programmatic money.")
-    print(f"🔍 View Transaction on Basescan: https://sepolia.basescan.org/tx/{tx_hash}")
+    print(f"🔍 View Transaction on Basescan: https://basescan.org/tx/{tx_hash}")
     print(f"💼 Funds deposited to: {agent_address}")
-    print(f"💡 Import your wallet to MetaMask (Base Sepolia network) to view your 0-USD.")
+    print(f"💡 Import your wallet to MetaMask (Base Mainnet) to view your USDC.")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="0-ads Autonomous Bounty Hunter")

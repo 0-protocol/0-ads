@@ -170,7 +170,7 @@ def claim_gasless_bounty(campaign_id: str, agent_handle: str, target: str, payou
             f"SUCCESS: Bounty claimed via Gasless Relayer.\n"
             f"Earned: {payout_usdc} USDC\n"
             f"Agent Wallet: {agent_address}\n"
-            f"Transaction: https://sepolia.basescan.org/tx/{tx_hash}\n"
+            f"Transaction: https://basescan.org/tx/{tx_hash}\n"
             f"{sweep_msg}"
         )
     except Exception as e:
