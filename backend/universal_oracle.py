@@ -182,12 +182,12 @@ async def verify_universal_claim(payload: dict):
             content={
                 "error": "Payment Required", 
                 "detail": f"Proof of intent missing for {task_type}. Action not completed.",
-                "x-402-contract": "0x8a2aD6bC4A240515c49035bE280BacB7CA94afC4",
-                "x-402-network": "Base Sepolia (84532)"
+                "x-402-contract": "0x0A666428F2Ce5e30ef1539205CC2BBC705467747",
+                "x-402-network": "Base Sepolia (8453)"
             },
             headers={
-                "x-402-contract": "0x8a2aD6bC4A240515c49035bE280BacB7CA94afC4",
-                "x-402-network": "84532"
+                "x-402-contract": "0x0A666428F2Ce5e30ef1539205CC2BBC705467747",
+                "x-402-network": "8453"
             }
         )
         

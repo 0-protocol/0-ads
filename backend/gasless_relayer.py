@@ -16,10 +16,10 @@ logger = logging.getLogger("0-ads-Relayer")
 app = FastAPI(title="0-ads Gasless Relayer Node")
 
 # --- Configuration ---
-RPC_URL = os.environ.get("RPC_URL", "https://sepolia.base.org")
-CHAIN_ID = int(os.environ.get("CHAIN_ID", 84532))
+RPC_URL = os.environ.get("RPC_URL", "https://mainnet.base.org")
+CHAIN_ID = int(os.environ.get("CHAIN_ID", 8453))
 RELAYER_PRIVATE_KEY = os.environ.get("RELAYER_PRIVATE_KEY")
-CONTRACT_ADDRESS = os.environ.get("CONTRACT_ADDRESS", "0x8a2aD6bC4A240515c49035bE280BacB7CA94afC4")
+CONTRACT_ADDRESS = os.environ.get("CONTRACT_ADDRESS", "0x0A666428F2Ce5e30ef1539205CC2BBC705467747")
 RELAYER_API_KEYS: set = set(filter(None, os.environ.get("RELAYER_API_KEYS", "").split(",")))
 REQUIRE_RELAYER_AUTH: bool = os.environ.get("RELAYER_AUTH_REQUIRED", "true").lower() not in ("false", "0", "off")
 RATE_LIMIT_PER_MIN: int = int(os.environ.get("RELAYER_RATE_LIMIT_RPM", "30"))

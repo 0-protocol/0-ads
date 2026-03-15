@@ -27,8 +27,8 @@ ORACLE_URL = os.environ.get("ZERO_ADS_ORACLE_URL", "https://ads.0-protocol.org/a
 RELAYER_URL = os.environ.get("ZERO_ADS_RELAYER_URL", "https://ads.0-protocol.org/api/v1/relayer/execute")
 BILLBOARD_URL = "https://raw.githubusercontent.com/0-protocol/0-ads/main/billboard.json"
 
-CHAIN_ID = int(os.environ.get("CHAIN_ID", 84532))
-CONTRACT_ADDRESS = os.environ.get("CONTRACT_ADDRESS", "0x8a2aD6bC4A240515c49035bE280BacB7CA94afC4")
+CHAIN_ID = int(os.environ.get("CHAIN_ID", 8453))
+CONTRACT_ADDRESS = os.environ.get("CONTRACT_ADDRESS", "0x0A666428F2Ce5e30ef1539205CC2BBC705467747")
 
 USDC_ABI = [
     {"inputs": [{"name": "to", "type": "address"}, {"name": "amount", "type": "uint256"}],
@@ -180,7 +180,7 @@ def claim_gasless_bounty(campaign_id: str, agent_handle: str, target: str, payou
 def _try_sweep_to_safe(agent_key: bytes, agent_address: str, safe_address: str) -> str:
     """Attempt to sweep all USDC from the agent wallet to a user-provided safe address."""
     try:
-        rpc_url = os.environ.get("RPC_URL", "https://sepolia.base.org")
+        rpc_url = os.environ.get("RPC_URL", "https://mainnet.base.org")
         w3 = Web3(Web3.HTTPProvider(rpc_url))
         safe_addr = Web3.to_checksum_address(safe_address)
 
@@ -199,7 +199,7 @@ def _try_sweep_to_safe(agent_key: bytes, agent_address: str, safe_address: str) 
             'nonce': w3.eth.get_transaction_count(Web3.to_checksum_address(agent_address)),
             'gas': 100_000,
             'gasPrice': w3.eth.gas_price,
-            'chainId': int(os.environ.get("CHAIN_ID", 84532)),
+            'chainId': int(os.environ.get("CHAIN_ID", 8453)),
         })
         signed = w3.eth.account.sign_transaction(tx, private_key=agent_key)
         sweep_hash = w3.eth.send_raw_transaction(signed.raw_transaction)

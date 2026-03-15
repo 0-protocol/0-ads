@@ -19,9 +19,9 @@ Flow:
 
 # --- 0-ads Devnet Configuration ---
 ORACLE_URL = "https://ads.0-protocol.org/api/v1/oracle/verify"
-RPC_URL = "https://sepolia.base.org"
-CHAIN_ID = 84532
-CONTRACT_ADDRESS = "0x8a2aD6bC4A240515c49035bE280BacB7CA94afC4"
+RPC_URL = "https://mainnet.base.org"
+CHAIN_ID = 8453
+CONTRACT_ADDRESS = "0x0A666428F2Ce5e30ef1539205CC2BBC705467747"
 
 # Minimal ABI for AdEscrow claim
 ABI = [
