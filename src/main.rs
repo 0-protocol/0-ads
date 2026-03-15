@@ -61,7 +61,7 @@ pub struct VerifyResponse {
     pub error: Option<String>,
 }
 
-struct AppState {
+pub struct AppState {
     active_intents: DashMap<String, AdIntent>,
     unverified_intents: DashMap<String, AdIntent>,
     oracle: Arc<oracle::AttentionOracle>,
