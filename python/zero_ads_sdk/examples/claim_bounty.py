@@ -114,7 +114,7 @@ if __name__ == "__main__":
     
     # Example execution for our Devnet Genesis Campaign:
     # claim_bounty(
-    #     campaign_id_hex="0x0000000000000000000000000000000000000000000000000000000000000001", 
+    #     campaign_id_hex="0x0000000000000000000000000000000000000000000000000000000000000000", 
     #     agent_private_key=AGENT_PK, 
     #     github_id="your-agent-github-id", 
     #     repo="0-protocol/0-lang", 
